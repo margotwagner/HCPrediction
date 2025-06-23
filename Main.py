@@ -9,7 +9,6 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -270,14 +269,33 @@ def main():
     if args.pred:
         print("Network output prediction one-step ahead", file=f)
         net = ElmanRNN_pred(N, hidden_N, N)
+        print("Input dim: ", net.input_dim)
+        print("Hidden dim: ", net.hidden_dim)
+        print("Output dim: ", net.output_dim)
+
         print("Input → Hidden weights:\n", net.input_linear.weight)
-        print("Input → Hidden bias:\n", net.input_linear.bias)
+        print("Shape: ", net.input_linear.weight.shape)
+        plt.figure()
+        plt.imshow(net.input_linear.weight.detach().numpy())
+        plt.savefig("./figures/input_linear_weights.png")
+        print()
+        # print("Input → Hidden bias:\n", net.input_linear.bias)
 
         print("Hidden → Hidden weights:\n", net.hidden_linear.weight)
-        print("Hidden → Hidden bias:\n", net.hidden_linear.bias)
+        print("Shape: ", net.hidden_linear.weight.shape)
+        print()
+        plt.figure()
+        plt.imshow(net.hidden_linear.weight.detach().numpy())
+        plt.savefig("./figures/hidden_linear_weights.png")
+        # print("Hidden → Hidden bias:\n", net.hidden_linear.bias)
 
         print("Hidden → Output weights:\n", net.linear3.weight)
-        print("Hidden → Output bias:\n", net.linear3.bias)
+        print("Shape: ", net.linear3.weight.shape)
+        print()
+        plt.figure()
+        plt.imshow(net.linear3.weight.detach().numpy())
+        plt.savefig("./figures/output_linear_weights.png")
+        # print("Hidden → Output bias:\n", net.linear3.bias)
         quit()
     if args.pred and args.Hregularized:
         print("Network output predeiction one-step ahead and Hregularized", file=f)

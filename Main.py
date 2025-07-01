@@ -277,7 +277,7 @@ def main():
         print("Shape: ", net.input_linear.weight.shape)
         plt.figure()
         plt.imshow(net.input_linear.weight.detach().numpy())
-        plt.savefig("./figures/input_linear_weights.png")
+        plt.savefig("./figures/mh_input_linear_weights.png")
         print()
         # print("Input → Hidden bias:\n", net.input_linear.bias)
 
@@ -286,7 +286,7 @@ def main():
         print()
         plt.figure()
         plt.imshow(net.hidden_linear.weight.detach().numpy())
-        plt.savefig("./figures/hidden_linear_weights.png")
+        plt.savefig("./figures/mh_hidden_linear_weights.png")
         # print("Hidden → Hidden bias:\n", net.hidden_linear.bias)
 
         print("Hidden → Output weights:\n", net.linear3.weight)
@@ -294,7 +294,7 @@ def main():
         print()
         plt.figure()
         plt.imshow(net.linear3.weight.detach().numpy())
-        plt.savefig("./figures/output_linear_weights.png")
+        plt.savefig("./figures/mh_output_linear_weights.png")
         # print("Hidden → Output bias:\n", net.linear3.bias)
         quit()
     if args.pred and args.Hregularized:

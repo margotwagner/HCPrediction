@@ -148,6 +148,35 @@ class ElmanRNN_pred(nn.Module):
         self.tanh = nn.Tanh()
         self.act = nn.Softmax(2)  # activation functions
 
+        # initialize to mexican hat
+        self.init_mexican_hat_weights()
+
+    def mexican_hat_1d(self, size, sigma=1.0):
+        x = torch.linspace(-size // 2, size // 2, steps=size)
+        x2 = x**2
+        mh = (1 - x2 / sigma**2) * torch.exp(-x2 / (2 * sigma**2))  # shape: (size,)
+        return mh
+
+    def init_mexican_hat_weights(self):
+        # broadcast Mexican hat across rows or columns
+        with torch.no_grad():
+            # input weights
+            mh = self.mexican_hat_1d(self.input_dim).unsqueeze(
+                0
+            )  # shape: (1, input_dim)
+            self.input_linear.weight.copy_(mh.repeat(self.hidden_dim, 1))
+            self.input_linear.bias.zero_()
+
+            # hidden weights
+            mh = self.mexican_hat_1d(self.hidden_dim).unsqueeze(0)
+            self.hidden_linear.weight.copy_(mh.repeat(self.hidden_dim, 1))
+            self.hidden_linear.bias.zero_()
+
+            # output weights
+            mh = self.mexican_hat_1d(self.hidden_dim).unsqueeze(0)
+            self.linear3.weight.copy_(mh.repeat(self.output_dim, 1))
+            self.linear3.bias.zero_()
+
     def forward(self, x, h0):
         batch_size, SeqN, _ = x.shape
         ht = h0

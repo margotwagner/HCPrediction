@@ -273,30 +273,29 @@ def main():
         print("Hidden dim: ", net.hidden_dim)
         print("Output dim: ", net.output_dim)
 
-        print("Input → Hidden weights:\n", net.input_linear.weight)
-        print("Shape: ", net.input_linear.weight.shape)
-        plt.figure()
-        plt.imshow(net.input_linear.weight.detach().numpy())
-        plt.savefig("./figures/input_linear_weights.png")
-        print()
+        # print("Input → Hidden weights:\n", net.input_linear.weight)
+        print("Input → Hidden Shape: ", net.input_linear.weight.shape)
+        # plt.figure()
+        # plt.imshow(net.input_linear.weight.detach().numpy())
+        # plt.savefig("./figures/input_linear_weights.png")
+        # print()
         # print("Input → Hidden bias:\n", net.input_linear.bias)
 
-        print("Hidden → Hidden weights:\n", net.hidden_linear.weight)
-        print("Shape: ", net.hidden_linear.weight.shape)
-        print()
-        plt.figure()
-        plt.imshow(net.hidden_linear.weight.detach().numpy())
-        plt.savefig("./figures/hidden_linear_weights.png")
+        # print("Hidden → Hidden weights:\n", net.hidden_linear.weight)
+        print("Hidden → Hidden Shape: ", net.hidden_linear.weight.shape)
+        # print()
+        # plt.figure()
+        # plt.imshow(net.hidden_linear.weight.detach().numpy())
+        # plt.savefig("./figures/hidden_linear_weights.png")
         # print("Hidden → Hidden bias:\n", net.hidden_linear.bias)
 
-        print("Hidden → Output weights:\n", net.linear3.weight)
-        print("Shape: ", net.linear3.weight.shape)
-        print()
-        plt.figure()
-        plt.imshow(net.linear3.weight.detach().numpy())
-        plt.savefig("./figures/output_linear_weights.png")
+        # print("Hidden → Output weights:\n", net.linear3.weight)
+        print("Hidden → Output Shape: ", net.linear3.weight.shape)
+        # print()
+        # plt.figure()
+        # plt.imshow(net.linear3.weight.detach().numpy())
+        # plt.savefig("./figures/output_linear_weights.png")
         # print("Hidden → Output bias:\n", net.linear3.bias)
-        quit()
     if args.pred and args.Hregularized:
         print("Network output predeiction one-step ahead and Hregularized", file=f)
         net = ElmanRNN_pred_v2(N, hidden_N, N)
@@ -389,7 +388,8 @@ def main():
         X_mini = loaded["X_mini"]
         Target_mini = loaded["Target_mini"]
 
-    print(X_mini.shape)
+    print("X_mini shape:", X_mini.shape)
+    print("Target_mini shape:", Target_mini.shape)
     # H0 value
     h0 = torch.zeros(1, X_mini.shape[0], hidden_N)  # n_layers * BatchN * NHidden
 
@@ -506,6 +506,7 @@ def main():
             file=f,
         )
     else:
+        print("Beginning partial training...")
         net, loss_list, y_hat, hidden = train_partial(
             X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, RecordEp, Mask
         )

@@ -1,2 +1,8 @@
+<<<<<<< HEAD
 __pycache__/
 Elman_SGD/
+=======
+__pycache__
+Elman_SGD
+figures
+>>>>>>> main

@@ -158,24 +158,23 @@ class ElmanRNN_pred(nn.Module):
         return mh
 
     def init_mexican_hat_weights(self):
-        # broadcast Mexican hat across rows or columns
+        # broadcast Mexican hat across diagonal of hidden weights
         with torch.no_grad():
-            # input weights
-            mh = self.mexican_hat_1d(self.input_dim).unsqueeze(
-                0
-            )  # shape: (1, input_dim)
-            self.input_linear.weight.copy_(mh.repeat(self.hidden_dim, 1))
-            self.input_linear.bias.zero_()
+            self.hidden_linear.weight.zero_()
+            mh = self.mexican_hat_1d(self.hidden_dim)
 
-            # hidden weights
-            mh = self.mexican_hat_1d(self.hidden_dim).unsqueeze(0)
-            self.hidden_linear.weight.copy_(mh.repeat(self.hidden_dim, 1))
+            for i in range(self.hidden_dim):
+                # main diagonal
+                self.hidden_linear.weight[i, i] = mh[i]
+
+                # lower diagonal
+                if i > 0:
+                    self.hidden_linear.weight[i, i - 1] = mh[i - 1]
+                # upper diagonal
+                if i < self.hidden_dim - 1:
+                    self.hidden_linear.weight[i, i + 1] = mh[i + 1]
+
             self.hidden_linear.bias.zero_()
-
-            # output weights
-            mh = self.mexican_hat_1d(self.hidden_dim).unsqueeze(0)
-            self.linear3.weight.copy_(mh.repeat(self.output_dim, 1))
-            self.linear3.bias.zero_()
 
     def forward(self, x, h0):
         batch_size, SeqN, _ = x.shape

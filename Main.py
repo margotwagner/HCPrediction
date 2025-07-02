@@ -6,6 +6,7 @@ import time
 import numpy as np
 from scipy.stats import norm
 import matplotlib
+import copy
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -281,13 +282,14 @@ def main():
         print()
         # print("Input → Hidden bias:\n", net.input_linear.bias)
 
-        print("Hidden → Hidden weights:\n", net.hidden_linear.weight)
-        print("Shape: ", net.hidden_linear.weight.shape)
+        # print("Hidden → Hidden weights:\n", net.hidden_linear.weight)
+        print("Hidden → Hidden Shape: ", net.hidden_linear.weight.shape)
         print()
         plt.figure()
         plt.imshow(net.hidden_linear.weight.detach().numpy())
-        plt.savefig("./figures/mh_hidden_linear_weights.png")
-        # print("Hidden → Hidden bias:\n", net.hidden_linear.bias)
+        initial_state = copy.deepcopy(net.state_dict())
+        plt.savefig("./figures/mh_hidden_linear_weights_07022025.png")
+        print("Hidden → Hidden bias:\n", net.hidden_linear.bias)
 
         print("Hidden → Output weights:\n", net.linear3.weight)
         print("Shape: ", net.linear3.weight.shape)
@@ -296,7 +298,6 @@ def main():
         plt.imshow(net.linear3.weight.detach().numpy())
         plt.savefig("./figures/mh_output_linear_weights.png")
         # print("Hidden → Output bias:\n", net.linear3.bias)
-        quit()
     if args.pred and args.Hregularized:
         print("Network output predeiction one-step ahead and Hregularized", file=f)
         net = ElmanRNN_pred_v2(N, hidden_N, N)
@@ -389,7 +390,8 @@ def main():
         X_mini = loaded["X_mini"]
         Target_mini = loaded["Target_mini"]
 
-    print(X_mini.shape)
+    print("X_mini shape:", X_mini.shape)
+    print("Target_mini shape:", Target_mini.shape)
     # H0 value
     h0 = torch.zeros(1, X_mini.shape[0], hidden_N)  # n_layers * BatchN * NHidden
 
@@ -506,6 +508,7 @@ def main():
             file=f,
         )
     else:
+        print("Beginning partial training...")
         net, loss_list, y_hat, hidden = train_partial(
             X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, RecordEp, Mask
         )
@@ -515,7 +518,8 @@ def main():
 
     # save network input, state
     save_dict = {
-        "state_dict": net.state_dict(),
+        "initial_state_dict": initial_state,
+        "final_state_dict": net.state_dict(),
         "y_hat": y_hat,
         "X_mini": X_mini.cpu(),
         "Target_mini": Target_mini.cpu(),

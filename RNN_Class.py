@@ -149,30 +149,20 @@ class ElmanRNN_pred(nn.Module):
         self.act = nn.Softmax(2)  # activation functions
 
         # initialize to mexican hat
-        self.init_mexican_hat_weights()
+        self.init_hidden_weights()
 
-    def mexican_hat_1d(self, size, sigma=1.0):
-        x = torch.linspace(-size // 2, size // 2, steps=size)
-        x2 = x**2
-        mh = (1 - x2 / sigma**2) * torch.exp(-x2 / (2 * sigma**2))  # shape: (size,)
-        return mh
-
-    def init_mexican_hat_weights(self):
-        # broadcast Mexican hat across diagonal of hidden weights
+    def init_hidden_weights(self):
+        # set to +1 on diagonal and -1 on off-diagonal. zero elsewhere.
         with torch.no_grad():
             self.hidden_linear.weight.zero_()
-            mh = self.mexican_hat_1d(self.hidden_dim)
 
             for i in range(self.hidden_dim):
-                # main diagonal
-                self.hidden_linear.weight[i, i] = mh[i]
+                self.hidden_linear.weight[i, i] = 1  # main diagonal
 
-                # lower diagonal
                 if i > 0:
-                    self.hidden_linear.weight[i, i - 1] = mh[i - 1]
-                # upper diagonal
+                    self.hidden_linear.weight[i, i - 1] = 0  # lower off-diagonal
                 if i < self.hidden_dim - 1:
-                    self.hidden_linear.weight[i, i + 1] = mh[i + 1]
+                    self.hidden_linear.weight[i, i + 1] = 0  # upper off-diagonal
 
             self.hidden_linear.bias.zero_()
 

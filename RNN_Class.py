@@ -157,12 +157,12 @@ class ElmanRNN_pred(nn.Module):
             self.hidden_linear.weight.zero_()
 
             for i in range(self.hidden_dim):
-                self.hidden_linear.weight[i, i] = 1  # main diagonal
+                self.hidden_linear.weight[i, i] = 0.5  # main diagonal
 
                 if i > 0:
-                    self.hidden_linear.weight[i, i - 1] = 0  # lower off-diagonal
+                    self.hidden_linear.weight[i, i - 1] = -0.5  # lower off-diagonal
                 if i < self.hidden_dim - 1:
-                    self.hidden_linear.weight[i, i + 1] = 0  # upper off-diagonal
+                    self.hidden_linear.weight[i, i + 1] = -0.5  # upper off-diagonal
 
             self.hidden_linear.bias.zero_()
 

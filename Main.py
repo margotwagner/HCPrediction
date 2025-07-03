@@ -270,6 +270,8 @@ def main():
     if args.pred:
         print("Network output prediction one-step ahead", file=f)
         net = ElmanRNN_pred(N, hidden_N, N)
+        initial_state = copy.deepcopy(net.state_dict())
+        """
         print("Input dim: ", net.input_dim)
         print("Hidden dim: ", net.hidden_dim)
         print("Output dim: ", net.output_dim)
@@ -287,7 +289,6 @@ def main():
         print()
         plt.figure()
         plt.imshow(net.hidden_linear.weight.detach().numpy())
-        initial_state = copy.deepcopy(net.state_dict())
         plt.savefig("./figures/mh_hidden_linear_weights_07022025.png")
         print("Hidden → Hidden bias:\n", net.hidden_linear.bias)
 
@@ -298,6 +299,7 @@ def main():
         plt.imshow(net.linear3.weight.detach().numpy())
         plt.savefig("./figures/mh_output_linear_weights.png")
         # print("Hidden → Output bias:\n", net.linear3.bias)
+        """
     if args.pred and args.Hregularized:
         print("Network output predeiction one-step ahead and Hregularized", file=f)
         net = ElmanRNN_pred_v2(N, hidden_N, N)

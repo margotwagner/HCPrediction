@@ -149,20 +149,63 @@ class ElmanRNN_pred(nn.Module):
         self.act = nn.Softmax(2)  # activation functions
 
         # initialize to mexican hat
-        self.init_hidden_weights()
+        # self.init_hidden_weights()
+        # self.init_scaled_orthog_weights()
+        self.init_mh_weights()
 
-    def init_hidden_weights(self):
+    def init_orthog_weights(self):
+        # hidden weights (H->H) with orthogonal init
+        print("Initializing hidden_linear with orthogonal weights")
+        with torch.no_grad():
+            nn.init.orthogonal_(self.hidden_linear.weight)
+            self.hidden_linear.bias.zero_()
+
+        # optional: check
+        W = self.hidden_linear.weight.detach()
+        orth = W @ W.T
+        print("Is orthogonal?", torch.allclose(orth, torch.eye(W.shape[0]), atol=1e-5))
+
+    def init_scaled_orthog_weights(self, value=0.5):
+        # scaled orthogonal initialization
+        with torch.no_grad():
+            nn.init.orthogonal_(self.hidden_linear.weight)
+            self.hidden_linear.weight.mul_(value)  # optional damping
+            self.hidden_linear.bias.zero_()
+
+    def init_mh_weights(self):
+        """Generate a 1D Mexican hat vector of given size centered at 0."""
+        with torch.no_grad():
+            size = self.hidden_linear.weight.shape[0]
+            sigma = size / 5
+            center = size // 2
+            x = np.arange(size) - center
+            mh = (1 - (x**2) / sigma**2) * np.exp(-(x**2) / (2 * sigma**2))
+            # Construct Toeplitz matrix where each row is a shifted version of mh
+            mh_matrix = torch.stack(
+                [torch.roll(torch.tensor(mh), shifts=i) for i in range(size)]
+            )
+            self.hidden_linear.weight.copy_(mh_matrix)
+
+    def init_identity_weights(self, value=1):
+        # identity matrix
+        with torch.no_grad():
+            self.hidden_linear.weight.zero_()
+            for i in range(self.hidden_dim):
+                self.hidden_linear.weight[i, i] = value
+            self.hidden_linear.bias.zero_()
+
+    def init_diag_weights(self, diag=1, offdiag=-1):
         # set to +1 on diagonal and -1 on off-diagonal. zero elsewhere.
         with torch.no_grad():
             self.hidden_linear.weight.zero_()
 
             for i in range(self.hidden_dim):
-                self.hidden_linear.weight[i, i] = 0.5  # main diagonal
+                self.hidden_linear.weight[i, i] = diag  # main diagonal
 
                 if i > 0:
-                    self.hidden_linear.weight[i, i - 1] = -0.5  # lower off-diagonal
+                    self.hidden_linear.weight[i, i - 1] = offdiag  # lower off-diagonal
                 if i < self.hidden_dim - 1:
-                    self.hidden_linear.weight[i, i + 1] = -0.5  # upper off-diagonal
+                    self.hidden_linear.weight[i, i + 1] = offdiag  # upper off-diagonal
 
             self.hidden_linear.bias.zero_()
 

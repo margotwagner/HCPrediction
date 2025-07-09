@@ -176,7 +176,7 @@ class ElmanRNN_pred(nn.Module):
         """Generate a 1D Mexican hat vector of given size centered at 0."""
         with torch.no_grad():
             size = self.hidden_linear.weight.shape[0]
-            sigma = size / 5
+            sigma = size / 10
             center = size // 2
             x = np.arange(size) - center
             mh = (1 - (x**2) / sigma**2) * np.exp(-(x**2) / (2 * sigma**2))

@@ -147,23 +147,60 @@ class ElmanRNN_pred(nn.Module):
         self.linear3 = nn.Linear(self.hidden_dim, self.output_dim)
         self.tanh = nn.Tanh()
         self.act = nn.Softmax(2)  # activation functions
+        self.xavier_var = 0.005015
+
+        # initialize input/output weights to xavier
+        self.init_xavier_io_weights()
+        # self.init_xavier_hidden_weights()
 
         # initialize to mexican hat
         # self.init_hidden_weights()
         # self.init_scaled_orthog_weights()
-        self.init_mh_weights()
+        # self.init_mh_weights()
+
+    def init_xavier_io_weights(self):
+        """initialize input/output weights using Xavier initialization."""
+        # input weights
+        nn.init.xavier_uniform_(
+            self.input_linear.weight, gain=nn.init.calculate_gain("tanh")
+        )
+        nn.init.zeros_(self.input_linear.bias)
+
+        # output weights
+        nn.init.xavier_uniform_(self.linear3.weight)
+        nn.init.zeros_(self.linear3.bias)
+
+    def init_xavier_hidden_weights(self):
+        """initialize hidden weights to Xavier as baseline."""
+        nn.init.xavier_uniform_(self.hidden_linear.weight)
+        nn.init.zeros_(self.hidden_linear.bias)
+
+        W = self.hidden_linear.weight.data
+        variance = W.var().item()
+        print(f"Xavier variance: {variance: .6f}")
 
     def init_orthog_weights(self):
         # hidden weights (H->H) with orthogonal init
         print("Initializing hidden_linear with orthogonal weights")
+        W = torch.empty(self.hidden_dim, self.hidden_dim)
+        nn.init.orthogonal_(W)
+        nn.init.zeros_(self.hidden_linear.bias)
+        current_var = W.var().item()
+        print(f"Orthogonal variance before scaling: {current_var:.6f}")
+
+        scaling_factor = (self.xavier_var / current_var) ** 0.5
+        W_scaled = W * scaling_factor
+        print(f"Orthogonal variance before scaling: {W_scaled.var().item():.6f}")
+
         with torch.no_grad():
-            nn.init.orthogonal_(self.hidden_linear.weight)
-            self.hidden_linear.bias.zero_()
+            self.hidden_linear.weight.copy_(W_scaled)
 
         # optional: check
-        W = self.hidden_linear.weight.detach()
-        orth = W @ W.T
-        print("Is orthogonal?", torch.allclose(orth, torch.eye(W.shape[0]), atol=1e-5))
+        orth = W_scaled @ W_scaled.T
+        print(
+            "Is orthogonal?",
+            torch.allclose(orth, torch.eye(W_scaled.shape[0]), atol=1e-5),
+        )
 
     def init_scaled_orthog_weights(self, value=0.5):
         # scaled orthogonal initialization

@@ -154,12 +154,12 @@ class ElmanRNN_pred(nn.Module):
         # self.init_xavier_hidden_weights()
         # self.init_orthog_weights()
         # self.init_identity_weights()
-        self.init_tridiag_weights()
+        # self.init_tridiag_weights()
 
         # initialize to mexican hat
         # self.init_hidden_weights()
         # self.init_scaled_orthog_weights()
-        # self.init_mh_weights()
+        self.init_mh_weights()
 
     def init_xavier_io_weights(self):
         """initialize input/output weights using Xavier initialization."""
@@ -173,10 +173,12 @@ class ElmanRNN_pred(nn.Module):
         nn.init.xavier_uniform_(self.linear3.weight)
         nn.init.zeros_(self.linear3.bias)
 
+        # set hidden weight bias to zero
+        nn.init.zeros_(self.hidden_linear.bias)
+
     def init_xavier_hidden_weights(self):
         """initialize hidden weights to Xavier as baseline."""
         nn.init.xavier_uniform_(self.hidden_linear.weight)
-        nn.init.zeros_(self.hidden_linear.bias)
 
         W = self.hidden_linear.weight.data
         variance = W.var().item()
@@ -187,7 +189,6 @@ class ElmanRNN_pred(nn.Module):
         print("Initializing hidden_linear with orthogonal weights")
         W = torch.empty(self.hidden_dim, self.hidden_dim)
         nn.init.orthogonal_(W)
-        nn.init.zeros_(self.hidden_linear.bias)
         current_var = W.var().item()
         print(f"Orthogonal variance before scaling: {current_var:.6f}")
 
@@ -223,22 +224,42 @@ class ElmanRNN_pred(nn.Module):
     def init_mh_weights(self):
         """Generate a 1D Mexican hat vector of given size centered at 0."""
         with torch.no_grad():
-            size = self.hidden_linear.weight.shape[0]
+            size = self.hidden_dim
             sigma = size / 10
             center = size // 2
-            x = np.arange(size) - center
+
+            # 1D mexican hat kernel
+            x = np.arange(-center, size - center)
             mh = (1 - (x**2) / sigma**2) * np.exp(-(x**2) / (2 * sigma**2))
-            # Construct Toeplitz matrix where each row is a shifted version of mh
-            mh_matrix = torch.stack(
-                [torch.roll(torch.tensor(mh), shifts=i) for i in range(size)]
-            )
+            mh = torch.tensor(mh, dtype=torch.float32)
+
+            # construct Toeplitz matrix
+            mh_matrix = torch.empty((size, size))
+            for i in range(size):
+                for j in range(size):
+                    idx = i - j + center
+                    if 0 <= idx < size:
+                        mh_matrix[i, j] = mh[idx]
+                    else:
+                        mh_matrix[i, j] = 0  # outside bounds
+
+            # compute empirical variance
+            mean = mh_matrix.mean()
+            var = ((mh_matrix - mean) ** 2).mean()
+            print(f"Variance prior to scaling: {var:.6f}")
+
+            # scale to match target variance
+            scale = (self.xavier_var / var).sqrt()
+            mh_matrix *= scale
+            print(f"Variance after scaling: {mh_matrix.var().item():.6f}")
+
             self.hidden_linear.weight.copy_(mh_matrix)
 
     def init_identity_weights(self, value=1):
         nn.init.zeros_(self.hidden_linear.bias)
         alpha = (self.hidden_dim * self.xavier_var) ** 0.5
         with torch.no_grad():
-            self.hidden_linear.weight.copy_(torch.eye(self.hidden_dim) * 0.3)
+            self.hidden_linear.weight.copy_(torch.eye(self.hidden_dim) * alpha)
         print(f"Hidden weight variance: {self.hidden_linear.weight.var().item():.6f}")
 
     def init_tridiag_weights(self, diag_val=1, off_diag_val=-1):
@@ -262,7 +283,30 @@ class ElmanRNN_pred(nn.Module):
         with torch.no_grad():
             self.hidden_linear.weight.copy_(W_scaled)
 
-        nn.init.zeros_(self.input_linear.bias)
+    def init_cyclic_tridiag_weights(self, diag_val=1, off_diag_val=-1):
+        # initialize weights
+        W = torch.zeros((self.hidden_dim, self.hidden_dim))
+        W.fill_diagonal_(diag_val)
+
+        # fill tridiagonal
+        idx = torch.arange(self.hidden_dim - 1)
+        W[idx, idx + 1] = off_diag_val
+        W[idx + 1, idx] = off_diag_val
+
+        # wrap-around connections
+        W[0, self.hidden_dim - 1] = off_diag_val
+        W[self.hidden_dim - 1, 0] = off_diag_val
+
+        # scale to target variance
+        mean = W.mean()
+        var = ((W - mean) ** 2).mean()
+        print(f"Variance prior to scaling: {var:.6f}")
+        scale = (self.xavier_var / var).sqrt()
+        W_scaled = W * scale
+        print(f"Variance after scaling: {W_scaled.var().item():.6f}")
+
+        with torch.no_grad():
+            self.hidden_linear.weight.copy_(W_scaled)
 
     def forward(self, x, h0):
         batch_size, SeqN, _ = x.shape

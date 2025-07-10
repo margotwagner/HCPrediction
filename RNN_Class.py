@@ -152,6 +152,9 @@ class ElmanRNN_pred(nn.Module):
         # initialize input/output weights to xavier
         self.init_xavier_io_weights()
         # self.init_xavier_hidden_weights()
+        # self.init_orthog_weights()
+        # self.init_identity_weights()
+        self.init_tridiag_weights()
 
         # initialize to mexican hat
         # self.init_hidden_weights()
@@ -195,19 +198,27 @@ class ElmanRNN_pred(nn.Module):
         with torch.no_grad():
             self.hidden_linear.weight.copy_(W_scaled)
 
+        # Check orthogonality
+        WTW = W.T @ W
+        identity = torch.eye(W.shape[0])
+        is_orthogonal = torch.allclose(WTW, identity, atol=1e-5)
+
+        print("Is orthogonal:", is_orthogonal)
+        WTW = W_scaled.T @ W_scaled
+        lambda_max = WTW.diag().mean().item()  # estimate of alpha^2
+        approx_identity = torch.eye(W_scaled.shape[0]) * lambda_max
+        is_scaled_orthogonal = torch.allclose(WTW, approx_identity, atol=1e-5)
+
+        print("Is scaled orthogonal:", is_scaled_orthogonal)
+
         # optional: check
+        """
         orth = W_scaled @ W_scaled.T
         print(
             "Is orthogonal?",
             torch.allclose(orth, torch.eye(W_scaled.shape[0]), atol=1e-5),
         )
-
-    def init_scaled_orthog_weights(self, value=0.5):
-        # scaled orthogonal initialization
-        with torch.no_grad():
-            nn.init.orthogonal_(self.hidden_linear.weight)
-            self.hidden_linear.weight.mul_(value)  # optional damping
-            self.hidden_linear.bias.zero_()
+        """
 
     def init_mh_weights(self):
         """Generate a 1D Mexican hat vector of given size centered at 0."""
@@ -224,27 +235,34 @@ class ElmanRNN_pred(nn.Module):
             self.hidden_linear.weight.copy_(mh_matrix)
 
     def init_identity_weights(self, value=1):
-        # identity matrix
+        nn.init.zeros_(self.hidden_linear.bias)
+        alpha = (self.hidden_dim * self.xavier_var) ** 0.5
         with torch.no_grad():
-            self.hidden_linear.weight.zero_()
-            for i in range(self.hidden_dim):
-                self.hidden_linear.weight[i, i] = value
-            self.hidden_linear.bias.zero_()
+            self.hidden_linear.weight.copy_(torch.eye(self.hidden_dim) * 0.3)
+        print(f"Hidden weight variance: {self.hidden_linear.weight.var().item():.6f}")
 
-    def init_diag_weights(self, diag=1, offdiag=-1):
+    def init_tridiag_weights(self, diag_val=1, off_diag_val=-1):
         # set to +1 on diagonal and -1 on off-diagonal. zero elsewhere.
+        W = torch.zeros((self.hidden_dim, self.hidden_dim))
+        W.fill_diagonal_(diag_val)
+        idx = torch.arange(self.hidden_dim - 1)
+        W[idx, idx + 1] = off_diag_val
+        W[idx + 1, idx] = off_diag_val
+
+        # compute empirical mean and variance
+        mean = W.mean()
+        var = ((W - mean) ** 2).mean()
+        print(f"Variance prior to scaling: {var:.6f}")
+
+        # scale
+        scale = (self.xavier_var / var).sqrt()
+        W_scaled = W * scale
+        print(f"Variance after scaling: {W_scaled.var().item():.6f}")
+
         with torch.no_grad():
-            self.hidden_linear.weight.zero_()
+            self.hidden_linear.weight.copy_(W_scaled)
 
-            for i in range(self.hidden_dim):
-                self.hidden_linear.weight[i, i] = diag  # main diagonal
-
-                if i > 0:
-                    self.hidden_linear.weight[i, i - 1] = offdiag  # lower off-diagonal
-                if i < self.hidden_dim - 1:
-                    self.hidden_linear.weight[i, i + 1] = offdiag  # upper off-diagonal
-
-            self.hidden_linear.bias.zero_()
+        nn.init.zeros_(self.input_linear.bias)
 
     def forward(self, x, h0):
         batch_size, SeqN, _ = x.shape

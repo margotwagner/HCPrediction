@@ -151,15 +151,19 @@ class ElmanRNN_pred(nn.Module):
 
         # initialize input/output weights to xavier
         self.init_xavier_io_weights()
+
+        # initialize hidden weights
         # self.init_xavier_hidden_weights()
         # self.init_orthog_weights()
         # self.init_identity_weights()
         # self.init_tridiag_weights()
+        # self.init_cyclic_mh_weights()
+        # self.init_cyclic_weights()
+        # self.init_custom_mh()
+        # self.init_unitary_circulant()
 
-        # initialize to mexican hat
-        # self.init_hidden_weights()
-        # self.init_scaled_orthog_weights()
-        self.init_mh_weights()
+        # initialize hidden weights with noise
+        self.init_mh_noise()
 
     def init_xavier_io_weights(self):
         """initialize input/output weights using Xavier initialization."""
@@ -222,7 +226,7 @@ class ElmanRNN_pred(nn.Module):
         """
 
     def init_mh_weights(self):
-        """Generate a 1D Mexican hat vector of given size centered at 0."""
+        """Generate a 1D Mexican hat vector of given size with the maximum along the main diagonal. Non-cyclic"""
         with torch.no_grad():
             size = self.hidden_dim
             sigma = size / 10
@@ -255,6 +259,37 @@ class ElmanRNN_pred(nn.Module):
 
             self.hidden_linear.weight.copy_(mh_matrix)
 
+    def init_cyclic_mh_weights(self):
+        """Initialize weights with a cyclic Maxican hat kernel scaled to Xavier variance."""
+        with torch.no_grad():
+            size = self.hidden_dim
+            sigma = size / 10
+
+            # 1D cyclic Mexican hat kernel
+            x = np.arange(size)
+            x = np.minimum(x, size - x)  # cyclic distance from center
+            mh = (1 - (x**2) / sigma**2) * np.exp(-(x**2) / (2 * sigma**2))
+            mh = torch.tensor(mh, dtype=torch.float32)
+
+            # construct cyclic Toeplitz matrix
+            mh_matrix = torch.empty((size, size))
+            for i in range(size):
+                for j in range(size):
+                    dist = min(abs(i - j), size - abs(i - j))  # cyclic distance
+                    mh_matrix[i, j] = mh[dist]
+
+            # compute empirical variance
+            mean = mh_matrix.mean()
+            var = ((mh_matrix - mean) ** 2).mean()
+            print(f"Variance prior to scaling: {var:.6f}")
+
+            # scale to match target variance
+            scale = (self.xavier_var / var).sqrt()
+            mh_matrix *= scale
+            print(f"Variance after scaling: {mh_matrix.var().item():.6f}")
+
+            self.hidden_linear.weight.copy_(mh_matrix)
+
     def init_identity_weights(self, value=1):
         nn.init.zeros_(self.hidden_linear.bias)
         alpha = (self.hidden_dim * self.xavier_var) ** 0.5
@@ -262,13 +297,41 @@ class ElmanRNN_pred(nn.Module):
             self.hidden_linear.weight.copy_(torch.eye(self.hidden_dim) * alpha)
         print(f"Hidden weight variance: {self.hidden_linear.weight.var().item():.6f}")
 
+    def init_custom_mh(self):
+        sigma = 10
+        with torch.no_grad():
+            n = self.hidden_dim
+            m = n / 2
+
+            # generate 1d mexican hat vector
+            c = np.array(
+                [
+                    (2 / (np.sqrt(3 * np.pi) * sigma))
+                    * (1 - ((i - m) / sigma) ** 2)
+                    * np.exp(-((i - m) ** 2) / (2 * sigma**2))
+                    for i in range(n)
+                ]
+            )
+
+            # generate circulant matrix
+            C = np.stack([np.roll(c, i) for i in range(n)], axis=1)
+            var = np.var(C)
+            print("Mexican hat matrix variance:", var)
+
+            # scale to Xavier variance
+            C *= np.sqrt(self.xavier_var / var)
+            print("Variance after scaling:", np.var(C))
+
+            # assign to layer weights
+            self.hidden_linear.weight.copy_(torch.tensor(C, dtype=torch.float32))
+
     def init_tridiag_weights(self, diag_val=1, off_diag_val=-1):
         # set to +1 on diagonal and -1 on off-diagonal. zero elsewhere.
         W = torch.zeros((self.hidden_dim, self.hidden_dim))
-        W.fill_diagonal_(diag_val)
+        # W.fill_diagonal_(diag_val)
         idx = torch.arange(self.hidden_dim - 1)
-        W[idx, idx + 1] = off_diag_val
-        W[idx + 1, idx] = off_diag_val
+        W[idx, idx + 1] = 1  # off_diag_val
+        # W[idx + 1, idx] = off_diag_val
 
         # compute empirical mean and variance
         mean = W.mean()
@@ -307,6 +370,142 @@ class ElmanRNN_pred(nn.Module):
 
         with torch.no_grad():
             self.hidden_linear.weight.copy_(W_scaled)
+
+    def init_cyclic_weights(self):
+        """Initialize a square weight matrix as a cyclic (circulant) matrix."""
+        with torch.no_grad():
+            size = self.hidden_dim  # assume square: (hidden_dim, hidden_dim)
+            base_row = torch.randn(size)  # random 1D vector
+
+            # build circulant matrix by shifting base_row
+            circulant_matrix = torch.stack(
+                [base_row.roll(shifts=i) for i in range(size)]
+            )
+
+            # compute empirical variance
+            mean = circulant_matrix.mean()
+            var = ((circulant_matrix - mean) ** 2).mean()
+            print(f"Variance prior to scaling: {var:.6f}")
+
+            # normalize to control spectral norm (optional but useful)
+            circulant_matrix /= torch.norm(circulant_matrix, p=2)
+
+            # scale to match target variance
+            scale = (self.xavier_var / var).sqrt()
+            circulant_matrix *= scale
+            print(f"Variance after scaling: {circulant_matrix.var().item():.6f}")
+
+            self.hidden_linear.weight.copy_(circulant_matrix)
+
+    def init_unitary_circulant(self):
+        """Initialize hidden weights with real-valued circulant matrix whose eigenvalues lie on the complex unit circle (unitary), scaled to Xavier variance."""
+        with torch.no_grad():
+            # random complex phases on a unit circle
+            theta = np.random.uniform(0, 2 * np.pi, self.hidden_dim)
+            eigenvalues = np.exp(1j * theta)
+
+            # inverse FFT to get base rows (complex vector)
+            base_row = np.fft.ifft(eigenvalues)
+
+            # take real part (gives real circulant matrix)
+            base_row_real = base_row.real
+
+            # build circulant matrix
+            C = np.stack(
+                [np.roll(base_row_real, i) for i in range(self.hidden_dim)], axis=0
+            )
+
+            # scale to Xavier variance
+            var = np.var(C)
+            print("variance before scaling:", var)
+            scale = np.sqrt(self.xavier_var / var)
+            C *= scale
+            print("Variance after scaling:", np.var(C))
+
+            # copy to hidden weights
+            self.hidden_linear.weight.copy_(torch.tensor(C, dtype=torch.float32))
+
+    def init_cyclic_mh_weights(self):
+        """Initialize weights with a cyclic Maxican hat kernel scaled to Xavier variance."""
+        with torch.no_grad():
+            size = self.hidden_dim
+            sigma = size / 10
+
+            # 1D cyclic Mexican hat kernel
+            x = np.arange(size)
+            x = np.minimum(x, size - x)  # cyclic distance from center
+            mh = (1 - (x**2) / sigma**2) * np.exp(-(x**2) / (2 * sigma**2))
+            mh = torch.tensor(mh, dtype=torch.float32)
+
+            # construct cyclic Toeplitz matrix
+            mh_matrix = torch.empty((size, size))
+            for i in range(size):
+                for j in range(size):
+                    dist = min(abs(i - j), size - abs(i - j))  # cyclic distance
+                    mh_matrix[i, j] = mh[dist]
+
+            # compute empirical variance
+            mean = mh_matrix.mean()
+            var = ((mh_matrix - mean) ** 2).mean()
+            print(f"Variance prior to scaling: {var:.6f}")
+
+            # scale to match target variance
+            scale = (self.xavier_var / var).sqrt()
+            mh_matrix *= scale
+            print(f"Variance after scaling: {mh_matrix.var().item():.6f}")
+
+            self.hidden_linear.weight.copy_(mh_matrix)
+
+    def init_mh_noise(self, noise_mode="structure", noise_scale=0.1):
+        """Initialize hidden layers with a noisy Mexican hat circulant matrix scaled to match Xavier variance. Noise scale 0.1-0.5*base_variance is standard.
+        - noise_scale 0.1-0.25: prioritizes structure/interpretability
+        - 0.25 - 0.5: balanced structure + performance
+        - 0.5 - 1+: emphasis on trainability (ignore structure)
+        """
+        with torch.no_grad():
+            # mexican hat kernel
+            sigma = self.hidden_dim / 10
+
+            # 1D cyclic Mexican hat kernel
+            x = np.arange(self.hidden_dim)
+            x = np.minimum(x, self.hidden_dim - x)  # cyclic distance from center
+            mh = (1 - (x**2) / sigma**2) * np.exp(-(x**2) / (2 * sigma**2))
+            mh = torch.tensor(mh, dtype=torch.float32)
+
+            # construct cyclic Toeplitz matrix
+            mh_matrix = torch.empty((self.hidden_dim, self.hidden_dim))
+            for i in range(self.hidden_dim):
+                for j in range(self.hidden_dim):
+                    dist = min(abs(i - j), self.hidden_dim - abs(i - j))
+                    mh_matrix[i, j] = mh[dist]
+
+            # compute variance
+            print(f"Variance before noise: {mh_matrix.var().item():.6f}")
+
+            # add noise
+            print(f"Scaling noise to {noise_mode} at {noise_scale}")
+            if noise_mode == "structure":
+                noise_std = noise_scale * mh_matrix.std()
+            elif noise_mode == "xavier":
+                noise_std = noise_scale * self.xavier_var.sqrt()
+            elif noise_mode == "fixed":
+                noise_std = 0.01
+            else:
+                raise ValueError("noise_mode must be 'structure', 'xavier', or 'fixed'")
+            noise = torch.randn_like(mh_matrix) * noise_std
+            mh_matrix += noise
+
+            # re-compute variance
+            mean = mh_matrix.mean()
+            var = ((mh_matrix - mean) ** 2).mean()
+            print(f"Variance after noise (before scaling): {var:.6f}")
+
+            # scale to Xavier variance
+            scale = (self.xavier_var / var).sqrt()
+            mh_matrix *= scale
+            print(f"Variance after scaling: {mh_matrix.var().item():.6f}")
+
+            self.hidden_linear.weight.copy_(mh_matrix)
 
     def forward(self, x, h0):
         batch_size, SeqN, _ = x.shape

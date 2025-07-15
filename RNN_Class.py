@@ -163,7 +163,12 @@ class ElmanRNN_pred(nn.Module):
         # self.init_unitary_circulant()
 
         # initialize hidden weights with noise
-        self.init_mh_noise()
+        # self.init_mh_noise()
+        # self.init_shift_noise()
+        # self.init_orthog_noise()
+        self.init_cyclic_tridiag_noise(
+            diag_val=1, off_diag_val=-1, noise_mode="structure", noise_scale=1.5
+        )
 
     def init_xavier_io_weights(self):
         """initialize input/output weights using Xavier initialization."""
@@ -456,7 +461,7 @@ class ElmanRNN_pred(nn.Module):
 
             self.hidden_linear.weight.copy_(mh_matrix)
 
-    def init_mh_noise(self, noise_mode="structure", noise_scale=0.1):
+    def init_mh_noise(self, noise_mode="structure", noise_scale=1.0):
         """Initialize hidden layers with a noisy Mexican hat circulant matrix scaled to match Xavier variance. Noise scale 0.1-0.5*base_variance is standard.
         - noise_scale 0.1-0.25: prioritizes structure/interpretability
         - 0.25 - 0.5: balanced structure + performance
@@ -487,9 +492,9 @@ class ElmanRNN_pred(nn.Module):
             if noise_mode == "structure":
                 noise_std = noise_scale * mh_matrix.std()
             elif noise_mode == "xavier":
-                noise_std = noise_scale * self.xavier_var.sqrt()
+                noise_std = noise_scale * (self.xavier_var**0.5)
             elif noise_mode == "fixed":
-                noise_std = 0.01
+                noise_std = 0.1
             else:
                 raise ValueError("noise_mode must be 'structure', 'xavier', or 'fixed'")
             noise = torch.randn_like(mh_matrix) * noise_std
@@ -506,6 +511,108 @@ class ElmanRNN_pred(nn.Module):
             print(f"Variance after scaling: {mh_matrix.var().item():.6f}")
 
             self.hidden_linear.weight.copy_(mh_matrix)
+
+    def init_shift_noise(
+        self, off_diag_val=1, noise_scale=0.5, noise_mode="structure", cyclic=True
+    ):
+        # create shift matrix (upper off-diagonal)
+        W = torch.zeros((self.hidden_dim, self.hidden_dim))
+        idx = torch.arange(self.hidden_dim - 1)
+        W[idx, idx + 1] = off_diag_val
+
+        if cyclic:
+            W[-1, 0] = off_diag_val  # wrap-around element for cyclic shift
+        print(f"Using {'cyclic' if cyclic else 'standard'} shift matrix")
+        print(f"Variance before noise {W.var().item():.6f}")
+
+        # add noise
+        print(f"Adding noise_mode of {noise_mode} with noise_scale of {noise_scale}")
+        if noise_mode == "structure":
+            noise_std = noise_scale * W.std()
+        elif noise_mode == "xavier":
+            noise_std = noise_scale * (self.xavier_var**0.5)
+        elif noise_mode == "fixed":
+            noise_std = 0.05
+        else:
+            raise ValueError("noise_mode must be 'structure', 'xavier', or 'fixed'")
+
+        noise = torch.randn_like(W) * noise_std
+        W_noisy = W + noise
+
+        # compute variance
+        mean = W_noisy.mean()
+        var = ((W_noisy - mean) ** 2).mean()
+        print(f"Variance before scaling: {var:.6f}")
+
+        # scale
+        scale = (self.xavier_var / var).sqrt()
+        W_scaled = W_noisy * scale
+        print(f"Variance after scaling: {W_scaled.var().item():.6f}")
+
+        # copy into layer
+        with torch.no_grad():
+            self.hidden_linear.weight.copy_(W_scaled)
+
+    def init_orthog_noise(self, noise_scale=0.01):
+        """Initialize orthogonal matrix with noise"""
+        with torch.no_grad():
+            # create orthogonal matrix
+            W = torch.empty(self.hidden_dim, self.hidden_dim)
+            nn.init.orthogonal_(W)
+
+            # add Gaussian noise
+            noise = torch.randn_like(W) * noise_scale
+            W_noisy = W + noise
+
+            # re-orthogonalize using QR decomposition
+            Q, _ = torch.qr(W_noisy)  # Q is orthogonal
+
+            # scale to match Xavier variance
+            var = Q.var()
+            scale = (self.xavier_var / var).sqrt()
+            W_scaled = Q * scale
+            print(f"Variance after orthog and scaling: {W_scaled.var().item():.6f}")
+
+            self.hidden_linear.weight.copy_(W_scaled)
+
+    def init_cyclic_tridiag_noise(
+        self, diag_val=1, off_diag_val=1, noise_scale=0.1, noise_mode="xavier"
+    ):
+        W = torch.zeros((self.hidden_dim, self.hidden_dim))
+
+        # set main diagonal
+        W[torch.arange(self.hidden_dim), torch.arange(self.hidden_dim)] = diag_val
+
+        # set upper diagonal (wrap around)
+        W[
+            torch.arange(self.hidden_dim - 1), torch.arange(1, self.hidden_dim)
+        ] = off_diag_val
+        W[0, self.hidden_dim - 1] = off_diag_val
+        print(
+            f"Created cyclic tridiagonal matrix with diag={diag_val}, off-diag={off_diag_val}"
+        )
+
+        # add noise
+        print(f"Adding {noise_mode} noise scaled to {noise_scale}")
+        if noise_mode == "structure":
+            noise_std = noise_scale * W.std()
+        elif noise_mode == "xavier":
+            noise_std = noise_scale * (self.xavier_var**0.5)
+        elif noise_mode == "fixed":
+            noise_std = noise_scale
+        else:
+            raise ValueError("noise_mode must be 'structure', 'xavier', or 'fixed'")
+        noise = torch.randn_like(W) * noise_std
+        W_noisy = W + noise
+
+        # rescale to Xavier variance
+        var = W_noisy.var()
+        scale = (self.xavier_var / var).sqrt()
+        W_scaled = W_noisy * scale
+        print(f"Variance after scaling: {W_scaled.var().item():.6f}")
+
+        with torch.no_grad():
+            self.hidden_linear.weight.copy_(W_scaled)
 
     def forward(self, x, h0):
         batch_size, SeqN, _ = x.shape

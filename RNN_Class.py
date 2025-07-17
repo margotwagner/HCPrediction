@@ -166,9 +166,8 @@ class ElmanRNN_pred(nn.Module):
         # self.init_mh_noise()
         # self.init_shift_noise()
         # self.init_orthog_noise()
-        self.init_cyclic_tridiag_noise(
-            diag_val=1, off_diag_val=-1, noise_mode="structure", noise_scale=1.5
-        )
+        # self.init_cyclic_tridiag_noise(
+        #    diag_val=1, off_diag_val=-1, noise_mode="structure", noise_scale=1.5)
 
     def init_xavier_io_weights(self):
         """initialize input/output weights using Xavier initialization."""
@@ -623,6 +622,72 @@ class ElmanRNN_pred(nn.Module):
             htp1 = self.tanh(self.hidden_linear(ht))  # predict one-step ahead
             z[:, t + 1, :] = htp1  # z_{t+1} = h_{t+1|t}
         out = self.act(self.linear3(z))  # y_{t+1|t}
+        return out, ht
+
+
+class ElmanRNN_pred_noise(nn.Module):
+    """ElmanRNN for prediction task with learnable noise in the hidden weight initialization.
+    output prediction value: y_{t+1|t} at time t
+    y_{t+1|t} = sigma(W h_{t+1})
+    """
+
+    def __init__(
+        self, input_dim, hidden_dim, output_dim, off_diag_val=1.0, init_noise=0.01
+    ):
+        super(ElmanRNN_pred_noise, self).__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        self.xavier_var = 1 / hidden_dim
+
+        # layers
+        self.input_linear = nn.Linear(input_dim, hidden_dim)
+        self.linear3 = nn.Linear(hidden_dim, output_dim)
+
+        # activation
+        self.tanh = nn.Tanh()
+        self.act = nn.Softmax(dim=2)
+
+        # fixed cyclic shift matrix
+        W_shift = torch.zeros(hidden_dim, hidden_dim)
+        idx = torch.arange(hidden_dim - 1)
+        W_shift[idx, idx + 1] = off_diag_val
+        W_shift[-1, 0] = off_diag_val  # cyclic wrap-around
+        self.register_buffer("W_shift", W_shift)
+
+        # learnable noise and learnable noise scale
+        self.noise = nn.Parameter(torch.randn(hidden_dim, hidden_dim) * init_noise)
+        self.noise_scale = nn.Parameter(torch.tensor(0.5))
+
+        # Xavier initialization for I/O
+        nn.init.xavier_uniform_(self.input_linear.weight)
+        nn.init.zeros_(self.input_linear.bias)
+        nn.init.xavier_uniform_(self.linear3.weight)
+        nn.init.zeros_(self.linear3.bias)
+
+    def get_hidden_weights(self):
+        W = self.W_shift + self.noise_scale * self.noise
+
+        # scale to match Xavier variance
+        with torch.no_grad():
+            var = W.var()
+            scale = (self.xavier_var / var).sqrt()
+
+        return W * scale
+
+    def forward(self, x, h0):
+        batch_size, SeqN, _ = x.shape
+        ht = h0
+        z = torch.zeros((batch_size, SeqN, self.hidden_dim)).to(x.device)
+
+        # inject hidden weights
+        W_hidden = self.get_hidden_weights()
+
+        for t in range(SeqN - 1):
+            ht = self.tanh(self.input_linear(x[:, t, :]) + F.linear(ht, W_hidden))
+            htp1 = self.tanh(F.linear(ht, W_hidden))
+            z[:, t + 1, :] = htp1
+        out = self.act(self.linear3(z))
         return out, ht
 
 

@@ -269,37 +269,8 @@ def main():
         net = ElmanRNN_pytorch_module_v2(N, hidden_N, N)
     if args.pred:
         print("Network output prediction one-step ahead", file=f)
-        net = ElmanRNN_pred(N, hidden_N, N)
+        net = ElmanRNN_pred_noise(N, hidden_N, N)  # ElmanRNN_pred(N, hidden_N, N)
         initial_state = copy.deepcopy(net.state_dict())
-        """
-        print("Input dim: ", net.input_dim)
-        print("Hidden dim: ", net.hidden_dim)
-        print("Output dim: ", net.output_dim)
-
-        print("Input → Hidden weights:\n", net.input_linear.weight)
-        print("Shape: ", net.input_linear.weight.shape)
-        plt.figure()
-        plt.imshow(net.input_linear.weight.detach().numpy())
-        plt.savefig("./figures/mh_input_linear_weights.png")
-        print()
-        # print("Input → Hidden bias:\n", net.input_linear.bias)
-
-        # print("Hidden → Hidden weights:\n", net.hidden_linear.weight)
-        print("Hidden → Hidden Shape: ", net.hidden_linear.weight.shape)
-        print()
-        plt.figure()
-        plt.imshow(net.hidden_linear.weight.detach().numpy())
-        plt.savefig("./figures/mh_hidden_linear_weights_07022025.png")
-        print("Hidden → Hidden bias:\n", net.hidden_linear.bias)
-
-        print("Hidden → Output weights:\n", net.linear3.weight)
-        print("Shape: ", net.linear3.weight.shape)
-        print()
-        plt.figure()
-        plt.imshow(net.linear3.weight.detach().numpy())
-        plt.savefig("./figures/mh_output_linear_weights.png")
-        # print("Hidden → Output bias:\n", net.linear3.bias)
-        """
     if args.pred and args.Hregularized:
         print("Network output predeiction one-step ahead and Hregularized", file=f)
         net = ElmanRNN_pred_v2(N, hidden_N, N)
@@ -511,7 +482,15 @@ def main():
         )
     else:
         print("Beginning partial training...")
-        net, loss_list, y_hat, hidden = train_partial(
+        (
+            net,
+            loss_list,
+            y_hat,
+            hidden,
+            noise_stats,
+            saved_W,
+            grad_history,
+        ) = train_partial(
             X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, RecordEp, Mask
         )
     end = time.time()
@@ -527,6 +506,9 @@ def main():
         "Target_mini": Target_mini.cpu(),
         "hidden": hidden,
         "loss": loss_list,
+        "noise_stats": noise_stats,
+        "weights": saved_W,
+        "grad_history": grad_history,
     }
     if args.partial:
         save_dict["Mask_W"] = Mask_W
@@ -604,6 +586,9 @@ def train_partial(
     """
     params = list(net.parameters())
     print("{} parameters to optimize".format(len(params)))
+    noise_stats = {"noise_std": [], "noise_scale": [], "spectral_norm": []}
+    saved_W = []
+    grad_history = {name: [] for name, _ in net.named_parameters()}
     loss_list = []
     h_t = h0
     batch_size, SeqN, N = X_mini.shape
@@ -634,6 +619,19 @@ def train_partial(
                 output[:, 1:, :], Target_mini[:, 1:, :]
             )  # ignore the first time step
         loss.backward()  # Does backpropagation and calculates gradients
+        # log noise stats
+        s = log_hidden_stats(net)
+        for k in noise_stats:
+            noise_stats[k].append(s[k])
+        # saved hidden weights
+        with torch.no_grad():
+            W_now = net.get_hidden_weights().detach().cpu().clone()
+            saved_W.append(W_now)
+        # track gradient norms
+        for name, param in net.named_parameters():
+            if param.grad is not None and name in grad_history:
+                norm = param.grad.norm().item()
+                grad_history[name].append(norm)
         for l, p in enumerate(net.parameters()):
             if p.requires_grad:
                 p.grad.data[torch.from_numpy(Mask[l].astype(bool))] = 0
@@ -683,7 +681,7 @@ def train_partial(
                 X_mini.detach()
                 Target_mini.detach()
         epoch = epoch + 1
-    return net, loss_list, y_hat, hidden
+    return net, loss_list, y_hat, hidden, noise_stats, saved_W, grad_history
 
 
 def train_everyT(
@@ -1114,6 +1112,28 @@ def evaluate_onestep(X_mini, Target_mini, h_t, net, criterion):
         output_seq[:, t : t + 1, :] = o_t.cpu().detach().numpy()
         h_seq[:, t : t + 1, :] = h_t.cpu().detach().numpy().transpose((1, 0, 2))
     return output_seq, h_seq
+
+
+def log_hidden_stats(model):
+    """add the ability to look at learnable noise stats"""
+    with torch.no_grad():
+        W = model.get_hidden_weights()
+        return {
+            "noise_std": model.noise.std().item(),
+            "noise_scale": model.noise_scale.item(),
+            "spectral_norm": torch.norm(W, p=2).item(),
+        }
+
+
+def get_grad_norm(model):
+    """get gradient norms"""
+    total_norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.detach().data.norm(2)
+            total_norm += param_norm.item() ** 2
+
+    return total_norm**0.5
 
 
 if __name__ == "__main__":

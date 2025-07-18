@@ -355,8 +355,8 @@ def main():
     #     net = ElmanRNN(N,hidden_N,N)
 
     ## MSE criteria
-    criterion = nn.MSELoss(reduction="sum")
-    # criterion = nn.MSELoss(reduction='mean')
+    # criterion = nn.MSELoss(reduction="sum")
+    criterion = nn.MSELoss(reduction="mean")
 
     ##  load checkpoint and resume training
     if args.resume:

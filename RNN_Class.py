@@ -158,8 +158,11 @@ class ElmanRNN_pred(nn.Module):
         # self.init_orthog_weights()
         # self.init_identity_weights()
         # self.init_tridiag_weights()
-        self.init_cyclic_tridiag_weights()
-        # self.init_cyclic_mh_weights()
+        # self.init_cyclic_tridiag_weights()
+        # self.init_shift_weights()
+        # self.init_cyclic_shift_weights()
+        # self.init_mh_weights()
+        self.init_cyclic_mh_weights()
         # self.init_cyclic_weights()
         # self.init_custom_mh()
         # self.init_unitary_circulant()
@@ -372,6 +375,47 @@ class ElmanRNN_pred(nn.Module):
         mean = W.mean()
         var = ((W - mean) ** 2).mean()
         print(f"Variance prior to scaling: {var:.6f}")
+        scale = (self.xavier_var / var).sqrt()
+        W_scaled = W * scale
+        print(f"Variance after scaling: {W_scaled.var().item():.6f}")
+
+        with torch.no_grad():
+            self.hidden_linear.weight.copy_(W_scaled)
+
+    def init_shift_weights(self, off_diag_val=1):
+        print("WEIGHT_INIT: SHIFT")
+        # set to +1 upper off-diagonal. zero elsewhere.
+        W = torch.zeros((self.hidden_dim, self.hidden_dim))
+        idx = torch.arange(self.hidden_dim - 1)
+        W[idx, idx + 1] = off_diag_val
+
+        # compute empirical mean and variance
+        mean = W.mean()
+        var = ((W - mean) ** 2).mean()
+        print(f"Variance prior to scaling: {var:.6f}")
+
+        # scale
+        scale = (self.xavier_var / var).sqrt()
+        W_scaled = W * scale
+        print(f"Variance after scaling: {W_scaled.var().item():.6f}")
+
+        with torch.no_grad():
+            self.hidden_linear.weight.copy_(W_scaled)
+
+    def init_cyclic_shift_weights(self, off_diag_val=1):
+        print("WEIGHT_INIT: CYCLIC SHIFT")
+        # set to +1 upper off-diagonal. zero elsewhere.
+        W = torch.zeros((self.hidden_dim, self.hidden_dim))
+        idx = torch.arange(self.hidden_dim - 1)
+        W[idx, idx + 1] = off_diag_val  # upper off-diagonal
+        W[-1, 0] = off_diag_val  # wrap-around for cyclic shift
+
+        # compute empirical mean and variance
+        mean = W.mean()
+        var = ((W - mean) ** 2).mean()
+        print(f"Variance prior to scaling: {var:.6f}")
+
+        # scale
         scale = (self.xavier_var / var).sqrt()
         W_scaled = W * scale
         print(f"Variance after scaling: {W_scaled.var().item():.6f}")
@@ -622,8 +666,8 @@ class ElmanRNN_pred(nn.Module):
         ht = h0
         z = torch.zeros((batch_size, SeqN, self.hidden_dim)).to(x.device)
         for t in range(SeqN - 1):
-            ht = self.tanh(self.input_linear(x[:, t, :]) + self.hidden_linear(ht))
-            htp1 = self.tanh(self.hidden_linear(ht))  # predict one-step ahead
+            ht = self.relu(self.input_linear(x[:, t, :]) + self.hidden_linear(ht))
+            htp1 = self.relu(self.hidden_linear(ht))  # predict one-step ahead
             # ht = self.input_linear(x[:, t, :]) + self.hidden_linear(ht)
             # htp1 = self.hidden_linear(ht)  # predict one-step ahead
 

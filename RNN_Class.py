@@ -162,14 +162,14 @@ class ElmanRNN_pred(nn.Module):
         # self.init_shift_weights()
         # self.init_cyclic_shift_weights()
         # self.init_mh_weights()
-        self.init_cyclic_mh_weights()
+        # self.init_cyclic_mh_weights()
         # self.init_cyclic_weights()
         # self.init_custom_mh()
         # self.init_unitary_circulant()
 
         # initialize hidden weights with noise
         # self.init_mh_noise()
-        # self.init_shift_noise()
+        self.init_shift_noise()
         # self.init_orthog_noise()
         # self.init_cyclic_tridiag_noise(
         #    diag_val=1, off_diag_val=-1, noise_mode="structure", noise_scale=1.# 5)
@@ -560,7 +560,7 @@ class ElmanRNN_pred(nn.Module):
             self.hidden_linear.weight.copy_(mh_matrix)
 
     def init_shift_noise(
-        self, off_diag_val=1, noise_scale=0.5, noise_mode="structure", cyclic=True
+        self, off_diag_val=1, noise_scale=1.0, noise_mode="structure", cyclic=False
     ):
         # create shift matrix (upper off-diagonal)
         W = torch.zeros((self.hidden_dim, self.hidden_dim))
@@ -666,10 +666,10 @@ class ElmanRNN_pred(nn.Module):
         ht = h0
         z = torch.zeros((batch_size, SeqN, self.hidden_dim)).to(x.device)
         for t in range(SeqN - 1):
-            ht = self.relu(self.input_linear(x[:, t, :]) + self.hidden_linear(ht))
-            htp1 = self.relu(self.hidden_linear(ht))  # predict one-step ahead
-            # ht = self.input_linear(x[:, t, :]) + self.hidden_linear(ht)
-            # htp1 = self.hidden_linear(ht)  # predict one-step ahead
+            # ht = self.tanh(self.input_linear(x[:, t, :]) + self.hidden_linear(ht))
+            # htp1 = self.tanh(self.hidden_linear(ht))  # predict one-step ahead
+            ht = self.input_linear(x[:, t, :]) + self.hidden_linear(ht)
+            htp1 = self.hidden_linear(ht)  # predict one-step ahead
 
             z[:, t + 1, :] = htp1  # z_{t+1} = h_{t+1|t}
         out = self.act(self.linear3(z))  # y_{t+1|t}

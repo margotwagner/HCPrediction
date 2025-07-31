@@ -146,6 +146,7 @@ class ElmanRNN_pred(nn.Module):
         self.hidden_linear = nn.Linear(self.hidden_dim, self.hidden_dim)
         self.linear3 = nn.Linear(self.hidden_dim, self.output_dim)
         self.tanh = nn.Tanh()
+        self.relu = nn.ReLU()
         self.act = nn.Softmax(2)  # activation functions
         self.xavier_var = 0.005015
 
@@ -157,6 +158,10 @@ class ElmanRNN_pred(nn.Module):
         # self.init_orthog_weights()
         # self.init_identity_weights()
         # self.init_tridiag_weights()
+        # self.init_cyclic_tridiag_weights()
+        # self.init_shift_weights()
+        # self.init_cyclic_shift_weights()
+        # self.init_mh_weights()
         # self.init_cyclic_mh_weights()
         # self.init_cyclic_weights()
         # self.init_custom_mh()
@@ -164,10 +169,10 @@ class ElmanRNN_pred(nn.Module):
 
         # initialize hidden weights with noise
         # self.init_mh_noise()
-        # self.init_shift_noise()
+        self.init_shift_noise()
         # self.init_orthog_noise()
         # self.init_cyclic_tridiag_noise(
-        #    diag_val=1, off_diag_val=-1, noise_mode="structure", noise_scale=1.5)
+        #    diag_val=1, off_diag_val=-1, noise_mode="structure", noise_scale=1.# 5)
 
     def init_xavier_io_weights(self):
         """initialize input/output weights using Xavier initialization."""
@@ -295,7 +300,7 @@ class ElmanRNN_pred(nn.Module):
             self.hidden_linear.weight.copy_(mh_matrix)
 
     def init_identity_weights(self, value=1):
-        nn.init.zeros_(self.hidden_linear.bias)
+        print("Initializing hidden weights to scaled identity matrix")
         alpha = (self.hidden_dim * self.xavier_var) ** 0.5
         with torch.no_grad():
             self.hidden_linear.weight.copy_(torch.eye(self.hidden_dim) * alpha)
@@ -330,12 +335,13 @@ class ElmanRNN_pred(nn.Module):
             self.hidden_linear.weight.copy_(torch.tensor(C, dtype=torch.float32))
 
     def init_tridiag_weights(self, diag_val=1, off_diag_val=-1):
+        print("WEIGHT_INIT: TRIDIAGONAL")
         # set to +1 on diagonal and -1 on off-diagonal. zero elsewhere.
         W = torch.zeros((self.hidden_dim, self.hidden_dim))
-        # W.fill_diagonal_(diag_val)
+        W.fill_diagonal_(diag_val)
         idx = torch.arange(self.hidden_dim - 1)
-        W[idx, idx + 1] = 1  # off_diag_val
-        # W[idx + 1, idx] = off_diag_val
+        W[idx, idx + 1] = off_diag_val
+        W[idx + 1, idx] = off_diag_val
 
         # compute empirical mean and variance
         mean = W.mean()
@@ -351,6 +357,7 @@ class ElmanRNN_pred(nn.Module):
             self.hidden_linear.weight.copy_(W_scaled)
 
     def init_cyclic_tridiag_weights(self, diag_val=1, off_diag_val=-1):
+        print("WEIGHT_INIT: CYCLIC TRIDIAGONAL")
         # initialize weights
         W = torch.zeros((self.hidden_dim, self.hidden_dim))
         W.fill_diagonal_(diag_val)
@@ -368,6 +375,47 @@ class ElmanRNN_pred(nn.Module):
         mean = W.mean()
         var = ((W - mean) ** 2).mean()
         print(f"Variance prior to scaling: {var:.6f}")
+        scale = (self.xavier_var / var).sqrt()
+        W_scaled = W * scale
+        print(f"Variance after scaling: {W_scaled.var().item():.6f}")
+
+        with torch.no_grad():
+            self.hidden_linear.weight.copy_(W_scaled)
+
+    def init_shift_weights(self, off_diag_val=1):
+        print("WEIGHT_INIT: SHIFT")
+        # set to +1 upper off-diagonal. zero elsewhere.
+        W = torch.zeros((self.hidden_dim, self.hidden_dim))
+        idx = torch.arange(self.hidden_dim - 1)
+        W[idx, idx + 1] = off_diag_val
+
+        # compute empirical mean and variance
+        mean = W.mean()
+        var = ((W - mean) ** 2).mean()
+        print(f"Variance prior to scaling: {var:.6f}")
+
+        # scale
+        scale = (self.xavier_var / var).sqrt()
+        W_scaled = W * scale
+        print(f"Variance after scaling: {W_scaled.var().item():.6f}")
+
+        with torch.no_grad():
+            self.hidden_linear.weight.copy_(W_scaled)
+
+    def init_cyclic_shift_weights(self, off_diag_val=1):
+        print("WEIGHT_INIT: CYCLIC SHIFT")
+        # set to +1 upper off-diagonal. zero elsewhere.
+        W = torch.zeros((self.hidden_dim, self.hidden_dim))
+        idx = torch.arange(self.hidden_dim - 1)
+        W[idx, idx + 1] = off_diag_val  # upper off-diagonal
+        W[-1, 0] = off_diag_val  # wrap-around for cyclic shift
+
+        # compute empirical mean and variance
+        mean = W.mean()
+        var = ((W - mean) ** 2).mean()
+        print(f"Variance prior to scaling: {var:.6f}")
+
+        # scale
         scale = (self.xavier_var / var).sqrt()
         W_scaled = W * scale
         print(f"Variance after scaling: {W_scaled.var().item():.6f}")
@@ -512,7 +560,7 @@ class ElmanRNN_pred(nn.Module):
             self.hidden_linear.weight.copy_(mh_matrix)
 
     def init_shift_noise(
-        self, off_diag_val=1, noise_scale=0.5, noise_mode="structure", cyclic=True
+        self, off_diag_val=1, noise_scale=1.0, noise_mode="structure", cyclic=False
     ):
         # create shift matrix (upper off-diagonal)
         W = torch.zeros((self.hidden_dim, self.hidden_dim))
@@ -618,8 +666,11 @@ class ElmanRNN_pred(nn.Module):
         ht = h0
         z = torch.zeros((batch_size, SeqN, self.hidden_dim)).to(x.device)
         for t in range(SeqN - 1):
-            ht = self.tanh(self.input_linear(x[:, t, :]) + self.hidden_linear(ht))
-            htp1 = self.tanh(self.hidden_linear(ht))  # predict one-step ahead
+            # ht = self.tanh(self.input_linear(x[:, t, :]) + self.hidden_linear(ht))
+            # htp1 = self.tanh(self.hidden_linear(ht))  # predict one-step ahead
+            ht = self.input_linear(x[:, t, :]) + self.hidden_linear(ht)
+            htp1 = self.hidden_linear(ht)  # predict one-step ahead
+
             z[:, t + 1, :] = htp1  # z_{t+1} = h_{t+1|t}
         out = self.act(self.linear3(z))  # y_{t+1|t}
         return out, ht

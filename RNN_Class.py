@@ -632,7 +632,7 @@ class ElmanRNN_pred_noise(nn.Module):
     """
 
     def __init__(
-        self, input_dim, hidden_dim, output_dim, off_diag_val=1.0, init_noise=0.01
+        self, input_dim, hidden_dim, output_dim, off_diag_val=1.0, init_noise=1.0
     ):
         super(ElmanRNN_pred_noise, self).__init__()
         self.input_dim = input_dim
@@ -646,13 +646,14 @@ class ElmanRNN_pred_noise(nn.Module):
 
         # activation
         self.tanh = nn.Tanh()
+        self.relu = nn.ReLU()
         self.act = nn.Softmax(dim=2)
 
         # fixed cyclic shift matrix
         W_shift = torch.zeros(hidden_dim, hidden_dim)
         idx = torch.arange(hidden_dim - 1)
         W_shift[idx, idx + 1] = off_diag_val
-        W_shift[-1, 0] = off_diag_val  # cyclic wrap-around
+        # W_shift[-1, 0] = off_diag_val  # cyclic wrap-around
         self.register_buffer("W_shift", W_shift)
 
         # learnable noise and learnable noise scale
@@ -684,8 +685,8 @@ class ElmanRNN_pred_noise(nn.Module):
         W_hidden = self.get_hidden_weights()
 
         for t in range(SeqN - 1):
-            ht = self.tanh(self.input_linear(x[:, t, :]) + F.linear(ht, W_hidden))
-            htp1 = self.tanh(F.linear(ht, W_hidden))
+            ht = self.relu(self.input_linear(x[:, t, :]) + F.linear(ht, W_hidden))
+            htp1 = self.relu(F.linear(ht, W_hidden))
             z[:, t + 1, :] = htp1
         out = self.act(self.linear3(z))
         return out, ht

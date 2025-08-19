@@ -382,47 +382,6 @@ class ElmanRNN_pred(nn.Module):
         with torch.no_grad():
             self.hidden_linear.weight.copy_(W_scaled)
 
-    def init_shift_weights(self, off_diag_val=1):
-        print("WEIGHT_INIT: SHIFT")
-        # set to +1 upper off-diagonal. zero elsewhere.
-        W = torch.zeros((self.hidden_dim, self.hidden_dim))
-        idx = torch.arange(self.hidden_dim - 1)
-        W[idx, idx + 1] = off_diag_val
-
-        # compute empirical mean and variance
-        mean = W.mean()
-        var = ((W - mean) ** 2).mean()
-        print(f"Variance prior to scaling: {var:.6f}")
-
-        # scale
-        scale = (self.xavier_var / var).sqrt()
-        W_scaled = W * scale
-        print(f"Variance after scaling: {W_scaled.var().item():.6f}")
-
-        with torch.no_grad():
-            self.hidden_linear.weight.copy_(W_scaled)
-
-    def init_cyclic_shift_weights(self, off_diag_val=1):
-        print("WEIGHT_INIT: CYCLIC SHIFT")
-        # set to +1 upper off-diagonal. zero elsewhere.
-        W = torch.zeros((self.hidden_dim, self.hidden_dim))
-        idx = torch.arange(self.hidden_dim - 1)
-        W[idx, idx + 1] = off_diag_val  # upper off-diagonal
-        W[-1, 0] = off_diag_val  # wrap-around for cyclic shift
-
-        # compute empirical mean and variance
-        mean = W.mean()
-        var = ((W - mean) ** 2).mean()
-        print(f"Variance prior to scaling: {var:.6f}")
-
-        # scale
-        scale = (self.xavier_var / var).sqrt()
-        W_scaled = W * scale
-        print(f"Variance after scaling: {W_scaled.var().item():.6f}")
-
-        with torch.no_grad():
-            self.hidden_linear.weight.copy_(W_scaled)
-
     def init_cyclic_weights(self):
         """Initialize a square weight matrix as a cyclic (circulant) matrix."""
         with torch.no_grad():

@@ -66,7 +66,7 @@ parser.add_argument(
     "--savename", default="net", type=str, help="Default output saving name"
 )
 parser.add_argument(
-    "--output-dir",
+    "--output_dir",
     default="Elman_SGD/Remap_predloss/N100T100",
     type=str,
     help="Directory to save training information to",
@@ -396,7 +396,7 @@ def train_minibatch(
                 torch.nn.utils.clip_grad_norm_(net.parameters(), args.clip)
 
             optimizer.step()  # Updates the weights accordingly
-            optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad()
 
             batch_losses.append(loss.item())
 
@@ -406,7 +406,7 @@ def train_minibatch(
                 y_hat_record = output.detach().cpu()
                 h_t_record = h_t.detach().cpu()
                 Xmini_record = X_mini.detach().cpu()
-                Ymini_record = Ymini_record.detach().cpu()
+                Ymini_record = Y_mini.detach().cpu()
 
         # epoch-end bookkeeping
         epoch_loss = float(np.mean(batch_losses)) if batch_losses else float("nan")
@@ -458,7 +458,8 @@ def train_minibatch(
                 tanh_sat = float((h_dbg.abs() > 0.99).float().mean().item())
 
             # save raw hidden matrix for offline analysis
-            torch.save(Wh, os.path.join(args.output_dir), f"Wh_epoch{epoch:06d}.pt")
+            fname = os.path.join(args.output_dir, f"Wh_epoch{epoch:06d}.pt")
+            torch.save(Wh, fname)
 
             metrics.append(
                 {
@@ -505,8 +506,9 @@ def _spectral_radius(W: torch.Tensor) -> float:
     Returns:
         float: Spectral radius of W.
     """
-    eig = torch.linalg.eigvals(W).cpu()
-    return float(torch.max(torch.abs(eig)).item())
+    eigvals, _ = torch.eig(W, eigenvectors=False)
+    eigvals = eigvals[:, 0] + 1j * eigvals[:, 1]  # combine real + imag parts
+    return float(torch.max(torch.abs(eigvals)).item())
 
 
 def _frob(W: torch.Tensor) -> float:
@@ -519,7 +521,7 @@ def _frob(W: torch.Tensor) -> float:
     Returns:
         float: Frobenius norm.
     """
-    return float(torch.linalg.matrix_norm(W, ord="fro").item())
+    return float(torch.norm(W, p="fro").item())
 
 
 def record_grads(net, grad_list):

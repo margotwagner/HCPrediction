@@ -334,54 +334,6 @@ class ElmanRNN_pred(nn.Module):
             # assign to layer weights
             self.hidden_linear.weight.copy_(torch.tensor(C, dtype=torch.float32))
 
-    def init_tridiag_weights(self, diag_val=1, off_diag_val=-1):
-        print("WEIGHT_INIT: TRIDIAGONAL")
-        # set to +1 on diagonal and -1 on off-diagonal. zero elsewhere.
-        W = torch.zeros((self.hidden_dim, self.hidden_dim))
-        W.fill_diagonal_(diag_val)
-        idx = torch.arange(self.hidden_dim - 1)
-        W[idx, idx + 1] = off_diag_val
-        W[idx + 1, idx] = off_diag_val
-
-        # compute empirical mean and variance
-        mean = W.mean()
-        var = ((W - mean) ** 2).mean()
-        print(f"Variance prior to scaling: {var:.6f}")
-
-        # scale
-        scale = (self.xavier_var / var).sqrt()
-        W_scaled = W * scale
-        print(f"Variance after scaling: {W_scaled.var().item():.6f}")
-
-        with torch.no_grad():
-            self.hidden_linear.weight.copy_(W_scaled)
-
-    def init_cyclic_tridiag_weights(self, diag_val=1, off_diag_val=-1):
-        print("WEIGHT_INIT: CYCLIC TRIDIAGONAL")
-        # initialize weights
-        W = torch.zeros((self.hidden_dim, self.hidden_dim))
-        W.fill_diagonal_(diag_val)
-
-        # fill tridiagonal
-        idx = torch.arange(self.hidden_dim - 1)
-        W[idx, idx + 1] = off_diag_val
-        W[idx + 1, idx] = off_diag_val
-
-        # wrap-around connections
-        W[0, self.hidden_dim - 1] = off_diag_val
-        W[self.hidden_dim - 1, 0] = off_diag_val
-
-        # scale to target variance
-        mean = W.mean()
-        var = ((W - mean) ** 2).mean()
-        print(f"Variance prior to scaling: {var:.6f}")
-        scale = (self.xavier_var / var).sqrt()
-        W_scaled = W * scale
-        print(f"Variance after scaling: {W_scaled.var().item():.6f}")
-
-        with torch.no_grad():
-            self.hidden_linear.weight.copy_(W_scaled)
-
     def init_cyclic_weights(self):
         """Initialize a square weight matrix as a cyclic (circulant) matrix."""
         with torch.no_grad():
@@ -646,7 +598,7 @@ class ElmanRNN_tp1(nn.Module):
         self.output_dim = output_dim
         self.input_linear = nn.Linear(self.input_dim, self.hidden_dim)
         self.hidden_linear = nn.Linear(self.hidden_dim, self.hidden_dim)
-        self.linear3 = nn.Linear(self.hidden_dim, self.output_dim)
+        self.output_linear = nn.Linear(self.hidden_dim, self.output_dim)
         self.tanh = nn.Tanh()
         self.act = nn.Softmax(2)  # activation functions
 
@@ -658,7 +610,7 @@ class ElmanRNN_tp1(nn.Module):
             ht = self.tanh(self.input_linear(x[:, t, :]) + self.hidden_linear(ht))
             htp1 = self.tanh(self.hidden_linear(ht))  # predict one-step ahead
             z[:, t, :] = htp1  # z_{t} = h_{t+1|t}
-        out = self.act(self.linear3(z))  # y_{t+1|t}
+        out = self.act(self.output_linear(z))  # y_{t+1|t}
         return out, ht
 
 

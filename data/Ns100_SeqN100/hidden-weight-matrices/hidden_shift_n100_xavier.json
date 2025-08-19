@@ -1,0 +1,6 @@
+{
+  "type": "shift",
+  "n": 100,
+  "target_var": 0.01,
+  "note": "scaled to Xavier variance. Not cyclic."
+}

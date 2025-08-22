@@ -11,6 +11,7 @@ import os
 import shutil
 import time
 import numpy as np
+from numpy.linalg import eig
 from scipy.stats import norm
 import matplotlib
 
@@ -180,12 +181,12 @@ def main():
 
     if args.fixi:
         for name, p in net.named_parameters():
-            if name == "input_linear.weight":
+            if name == "input_linear.weight" or name == "rnn.weight_ih_l0":
                 p.requires_grad = False
                 p.data.fill_(0)
                 p.data.fill_diagonal_(1)
                 print("Fixing input matrix to identity matrix", file=f)
-            elif name == "input_linear.bias":
+            elif name == "input_linear.bias" or name == "rnn.bias_ih_l0":
                 p.requires_grad = False
                 p.data.fill_(0)
                 print("Fixing input bias to 0", file=f)
@@ -345,136 +346,139 @@ def train_minibatch(
             use_clip = None
 
     # save initial hidden weights for "drift from init" measurement
-    init_hidden = net.hidden_linear.weight.detach().cpu().clone()
+    if 'pytorch' in args.net:
+        init_hidden = net.rnn.weight_hh_l0.detach().cpu().clone()
+    else:
+        init_hidden = net.hidden_linear.weight.detach().cpu().clone()
 
-    # main training loop
-    while stop == 0 and epoch < n_epochs:
-        # optional learning-rate step decay
-        if args.lr_step:
-            lr_step = list(map(int, args.lr_step.split(",")))
-            if epoch in lr_step:
-                print("Decrease lr to 50per at epoch {}".format(epoch), file=f)
-                for param_group in optimizer.param_groups:
-                    param_group["lr"] *= 0.5
+    from tqdm import tqdm
 
-        optimizer.zero_grad()  # Clears existing gradients from previous epoch
-        batch_losses = []
-        grad_norm_for_record = None
-        y_hat_record = h_t_record = Xmini_record = Ymini_record = None
+    # main training loop with tqdm progress bar
+    with tqdm(total=n_epochs, desc="Training", unit="epoch") as pbar:
+        while stop == 0 and epoch < n_epochs:
+            # optional learning-rate step decay
+            if args.lr_step:
+                lr_step = list(map(int, args.lr_step.split(",")))
+                if epoch in lr_step:
+                    print("Decrease lr to 50per at epoch {}".format(epoch), file=f)
+                    for param_group in optimizer.param_groups:
+                        param_group["lr"] *= 0.5
 
-        num_batches = int(np.ceil(N / args.batch_size))
-        bs = args.batch_size
+            optimizer.zero_grad()  # Clears existing gradients from previous epoch
+            batch_losses = []
+            grad_norm_for_record = None
+            y_hat_record = h_t_record = Xmini_record = Ymini_record = None
 
-        for b in range(num_batches):
-            start_idx = b * bs
-            end_idx = min((b + 1) * bs, N)
-            X_mini = X[start_idx:end_idx]
-            Y_mini = Y[start_idx:end_idx]
+            num_batches = int(np.ceil(N / args.batch_size))
+            bs = args.batch_size
 
-            # forward pass
-            output, h_t = net(X_mini, h0)
+            for b in range(num_batches):
+                start_idx = b * bs
+                end_idx = min((b + 1) * bs, N)
+                X_mini = X[start_idx:end_idx]
+                Y_mini = Y[start_idx:end_idx]
 
-            # loss: prediction + hidden regularizers
-            loss1 = criterion(output, Y_mini)
-            loss2 = lamda * criterion(
-                h_t, torch.zeros(h_t.shape).to(X_mini.device)
-            ) + args.Hregularized_l1 * criterion_l1(
-                h_t, torch.zeros(h_t.shape).to(X_mini.device)
-            )
-            loss = loss1 + loss2
-            loss.backward()  # Does backpropagation and calculates gradients
+                # forward pass
+                output, h_t = net(X_mini, h0)
 
-            # record grad for recording epoch on chosen minibatch
-            if (epoch % RecordEp == 0) and (b == sample_batch_idx):
-                record_grads(net, grad_list)
-
-            # compute grad norm before clipping
-            gn = _total_grad_norm(net.parameters(), p=2.0)
-
-            # optional gradient clipping
-            if use_clip:
-                torch.nn.utils.clip_grad_norm_(net.parameters(), args.clip)
-
-            optimizer.step()  # Updates the weights accordingly
-            optimizer.zero_grad()
-
-            batch_losses.append(loss.item())
-
-            # save minibatch snapshot (IO, hidden, grad_norm)
-            if b == sample_batch_idx:
-                grad_norm_for_record = gn
-                y_hat_record = output.detach().cpu()
-                h_t_record = h_t.detach().cpu()
-                Xmini_record = X_mini.detach().cpu()
-                Ymini_record = Y_mini.detach().cpu()
-
-        # epoch-end bookkeeping
-        epoch_loss = float(np.mean(batch_losses)) if batch_losses else float("nan")
-        loss_list.append(epoch_loss)
-
-        # early stopping
-        if epoch > 1000 and all(np.abs(np.diff(loss_list[-10:])) < 1e-7):
-            stop = 1
-            print("Hit the stopping criterion < 1e-7", file=f)
-        if epoch % RecordEp == 0:
-            end = time.time()
-            deltat = end - start
-            start = time.time()
-            print("Epoch: {}/{}.............".format(epoch, n_epochs), end=" ")
-            print("Loss: {:.4f}".format(loss.item()))
-            print("Time Elapsed since last display: {0:.1f} seconds".format(deltat))
-            print(
-                "Estimated remaining time: {0:.1f} minutes".format(
-                    deltat * (n_epochs - epoch) / RecordEp / 60
+                # loss: prediction + hidden regularizers
+                loss1 = criterion(output, Y_mini)
+                loss2 = lamda * criterion(
+                    h_t, torch.zeros(h_t.shape).to(X_mini.device)
+                ) + args.Hregularized_l1 * criterion_l1(
+                    h_t, torch.zeros(h_t.shape).to(X_mini.device)
                 )
-            )
+                loss = loss1 + loss2
+                loss.backward()  # Does backpropagation and calculates gradients
 
-            # save IO/hidden snapshots for analysis
-            if y_hat_record is not None:
-                history["epoch"].append(epoch)
-                history["y_hat"].append(y_hat_record)
-                history["hidden"].append(h_t_record)
-                history["X_mini"].append(Xmini_record)
-                history["Target_mini"].append(Ymini_record)
-                history["loss"].append(epoch_loss)
-                history["grad_norm"].append(grad_norm_for_record)
+                # record grad for recording epoch on chosen minibatch
+                if (epoch % RecordEp == 0) and (b == sample_batch_idx):
+                    record_grads(net, grad_list)
 
-            # hidden weight analysis
-            Wh = net.hidden_linear.weight.detach().cpu()
-            drift = _frob(Wh - init_hidden)
-            frob_norm = _frob(Wh)
-            rho = _spectral_radius(Wh)
-            orth_err = None
+                # compute grad norm before clipping
+                gn = _total_grad_norm(net.parameters(), p=2.0)
 
-            if Wh.shape[0] == Wh.shape[1]:
-                I = torch.eye(Wh.shape[0])
-                orth_err = _frob(Wh.T @ Wh - I)  # orthogonality error
+                # optional gradient clipping
+                if use_clip:
+                    torch.nn.utils.clip_grad_norm_(net.parameters(), args.clip)
 
-            # hidden activation stats on current minibatch
-            with torch.no_grad():
-                out_dbg, h_dbg = net(X_mini, h0)
-                act_mean = float(h_dbg.mean().item())
-                act_std = float(h_dbg.std().item())
-                tanh_sat = float((h_dbg.abs() > 0.99).float().mean().item())
+                optimizer.step()  # Updates the weights accordingly
+                optimizer.zero_grad()
 
-            # save raw hidden matrix for offline analysis
-            fname = os.path.join(args.output_dir, f"Wh_epoch{epoch:06d}.pt")
-            torch.save(Wh, fname)
+                batch_losses.append(loss.item())
 
-            metrics.append(
-                {
-                    "epoch": epoch,
-                    "loss": epoch_loss,
-                    "frob": frob_norm,
-                    "drift_from_init": drift,
-                    "spectral_radius": rho,
-                    "orth_err": orth_err,
-                    "act_mean": act_mean,
-                    "act_std": act_std,
-                    "tanh_sat": tanh_sat,
-                }
-            )
-        epoch += 1
+                # save minibatch snapshot (IO, hidden, grad_norm)
+                if b == sample_batch_idx:
+                    grad_norm_for_record = gn
+                    y_hat_record = output.detach().cpu()
+                    h_t_record = h_t.detach().cpu()
+                    Xmini_record = X_mini.detach().cpu()
+                    Ymini_record = Y_mini.detach().cpu()
+
+            # epoch-end bookkeeping
+            epoch_loss = float(np.mean(batch_losses)) if batch_losses else float("nan")
+            loss_list.append(epoch_loss)
+
+            # tqdm: update progress bar and set loss in postfix
+            pbar.set_postfix({"loss": epoch_loss})
+            pbar.update(1)
+
+            # early stopping
+            if epoch > 1000 and all(np.abs(np.diff(loss_list[-10:])) < 1e-7):
+                stop = 1
+                print("Hit the stopping criterion < 1e-7", file=f)
+            if epoch % RecordEp == 0:
+                # save IO/hidden snapshots for analysis
+                if y_hat_record is not None:
+                    history["epoch"].append(epoch)
+                    history["y_hat"].append(y_hat_record)
+                    history["hidden"].append(h_t_record)
+                    history["X_mini"].append(Xmini_record)
+                    history["Target_mini"].append(Ymini_record)
+                    history["loss"].append(epoch_loss)
+                    history["grad_norm"].append(grad_norm_for_record)
+
+                # hidden weight analysis
+                if 'pytorch' in args.net:
+                    Wh = net.rnn.weight_hh_l0.detach().cpu()
+                else:
+                    Wh = net.hidden_linear.weight.detach().cpu()
+
+                drift = _frob(Wh - init_hidden)
+                frob_norm = _frob(Wh)
+                rho = _spectral_radius(Wh)
+                orth_err = None
+
+                if Wh.shape[0] == Wh.shape[1]:
+                    I = torch.eye(Wh.shape[0])
+                    orth_err = _frob(Wh.T @ Wh - I)  # orthogonality error
+
+                # hidden activation stats on current minibatch
+                with torch.no_grad():
+                    out_dbg, h_dbg = net(X_mini, h0)
+                    act_mean = float(h_dbg.mean().item())
+                    act_std = float(h_dbg.std().item())
+                    tanh_sat = float((h_dbg.abs() > 0.99).float().mean().item())
+
+                # save raw hidden matrix for offline analysis
+                os.makedirs(args.output_dir, exist_ok=True)
+                fname = os.path.join(args.output_dir, f"Wh_epoch{epoch:06d}.pt")
+                torch.save(Wh, fname)
+
+                metrics.append(
+                    {
+                        "epoch": epoch,
+                        "loss": epoch_loss,
+                        "frob": frob_norm,
+                        "drift_from_init": drift,
+                        "spectral_radius": rho,
+                        "orth_err": orth_err,
+                        "act_mean": act_mean,
+                        "act_std": act_std,
+                        "tanh_sat": tanh_sat,
+                    }
+                )
+            epoch += 1
 
     return net, loss_list, history, grad_list, metrics
 
@@ -506,9 +510,8 @@ def _spectral_radius(W: torch.Tensor) -> float:
     Returns:
         float: Spectral radius of W.
     """
-    eigvals, _ = torch.eig(W, eigenvectors=False)
-    eigvals = eigvals[:, 0] + 1j * eigvals[:, 1]  # combine real + imag parts
-    return float(torch.max(torch.abs(eigvals)).item())
+    eigvals = torch.linalg.eigvals(W)
+    return eigvals
 
 
 def _frob(W: torch.Tensor) -> float:

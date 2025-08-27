@@ -5,30 +5,54 @@ python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-siz
 --output_dir Elman_SGD/Remap_predloss/N100T100/shift/gaussian/single-run/hidden-weights/ \
 --savename Elman_SGD/Remap_predloss/N100T100/shift/gaussian/single-run/Ns100_SeqN100_predloss_full
 
-
-
-
-
 # Shift
-python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 --pred 1 --fixi 1 --hidden-n 100 --hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_shift_n100_xavier.npy --output_dir Elman_SGD/Remap_predloss/N100T100/shift/gaussian/single-run/hidden-weights/ --savename Elman_SGD/Remap_predloss/N100T100/shift/gaussian/single-run/Ns100_SeqN100_predloss_full
+python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_shift_n100_xavier.npy \
+--output_dir Elman_SGD/Remap_predloss/N100T100/shift/gaussian/single-run/hidden-weights/ \
+--savename Elman_SGD/Remap_predloss/N100T100/shift/gaussian/single-run/Ns100_SeqN100_predloss_full
 
 # Cyclic shift
-python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 --pred 1 --fixi 1 --hidden-n 100 --hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_cyclic_shift_n100_xavier.npy --output_dir Elman_SGD/Remap_predloss/N100T100/cyclic-shift/gaussian/single-run/hidden-weights/ --savename Elman_SGD/Remap_predloss/N100T100/cyclic-shift/gaussian/single-run/Ns100_SeqN100_predloss_full
+python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_cyclic_shift_n100_xavier.npy \
+--output_dir Elman_SGD/Remap_predloss/N100T100/cyclic-shift/gaussian/single-run/hidden-weights/ \
+--savename Elman_SGD/Remap_predloss/N100T100/cyclic-shift/gaussian/single-run/Ns100_SeqN100_predloss_full
 
 # Cyclic Mexican hat
-python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 --pred 1 --fixi 1 --hidden-n 100 --hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_cmh_n100_xavier.npy --output_dir Elman_SGD/Remap_predloss/N100T100/cmh/gaussian/single-run/hidden-weights/ --savename Elman_SGD/Remap_predloss/N100T100/cmh/gaussian/single-run/Ns100_SeqN100_predloss_full
+python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_cmh_n100_xavier.npy 
+--output_dir Elman_SGD/Remap_predloss/N100T100/cmh/gaussian/single-run/hidden-weights/ \
+--savename Elman_SGD/Remap_predloss/N100T100/cmh/gaussian/single-run/Ns100_SeqN100_predloss_full
 
 # Standard Mexican hat
-python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 --pred 1 --fixi 1 --hidden-n 100 --hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_mh_n100_xavier.npy --output_dir Elman_SGD/Remap_predloss/N100T100/mh/gaussian/single-run/hidden-weights/ --savename Elman_SGD/Remap_predloss/N100T100/mh/gaussian/single-run/Ns100_SeqN100_predloss_full
+python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_mh_n100_xavier.npy 
+--output_dir Elman_SGD/Remap_predloss/N100T100/mh/gaussian/single-run/hidden-weights/ \
+--savename Elman_SGD/Remap_predloss/N100T100/mh/gaussian/single-run/Ns100_SeqN100_predloss_full
 
 # Cyclic tridiagonal
-python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 --pred 1 --fixi 1 --hidden-n 100 --hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_ctridiag_n100_xavier.npy --output_dir Elman_SGD/Remap_predloss/N100T100/ctridiag/gaussian/single-run/hidden-weights/ --savename Elman_SGD/Remap_predloss/N100T100/ctridiag/gaussian/single-run/Ns100_SeqN100_predloss_full
+python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_ctridiag_n100_xavier.npy \
+--output_dir Elman_SGD/Remap_predloss/N100T100/ctridiag/gaussian/single-run/hidden-weights/ \
+--savename Elman_SGD/Remap_predloss/N100T100/ctridiag/gaussian/single-run/Ns100_SeqN100_predloss_full
 
 # Tridiagonal
-python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 --pred 1 --fixi 1 --hidden-n 100 --hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_ctridiag_n100_xavier.npy --output_dir Elman_SGD/Remap_predloss/N100T100/ctridiag/gaussian/single-run/hidden-weights/ --savename Elman_SGD/Remap_predloss/N100T100/ctridiag/gaussian/single-run/Ns100_SeqN100_predloss_full
+python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_ctridiag_n100_xavier.npy \
+--output_dir Elman_SGD/Remap_predloss/N100T100/ctridiag/gaussian/single-run/hidden-weights/ \
+--savename Elman_SGD/Remap_predloss/N100T100/ctridiag/gaussian/single-run/Ns100_SeqN100_predloss_full
 
 # Orthogonal
-python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 --pred 1 --fixi 1 --hidden-n 100 --hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_orthog_n100_xavier.npy --output_dir Elman_SGD/Remap_predloss/N100T100/ctridiag/orthog/single-run/hidden-weights/ --savename Elman_SGD/Remap_predloss/N100T100/orthog/gaussian/single-run/Ns100_SeqN100_predloss_full
+python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_orthog_n100_xavier.npy \
+--output_dir Elman_SGD/Remap_predloss/N100T100/orthog/gaussian/single-run/hidden-weights/ \
+--savename Elman_SGD/Remap_predloss/N100T100/orthog/gaussian/single-run/Ns100_SeqN100_predloss_full
 
 # Multiple runs Gaussian inputs
 # Standard He initialization

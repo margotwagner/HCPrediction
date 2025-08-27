@@ -5,11 +5,10 @@ Mini-batch based training:
     For remap test
 """
 
-import argparse
-import sys
-import os
-import shutil
-import time
+import argparse, sys, os, time
+import random, json, platform
+from datetime import datetime
+from tqdm import tqdm
 import numpy as np
 from numpy.linalg import eig
 from scipy.stats import norm
@@ -133,6 +132,16 @@ parser.add_argument(
 parser.add_argument(
     "--early_stop", default=0, type=int, help="whether to include early stopping"
 )
+parser.add_argument("--seed", type=int, default=1337, help="Global RNG seed")
+parser.add_argument(
+    "--deterministic",
+    type=int,
+    default=1,
+    help="Deterministic CUDA/cuDNN (may be slower)",
+)
+parser.add_argument(
+    "--run_tag", type=str, default="", help="Optional run tag for bookkeeping"
+)
 
 
 def main():
@@ -142,11 +151,24 @@ def main():
     lr = args.lr
     n_epochs = args.epochs
     RecordEp = args.print_freq
+    set_seed(args.seed, bool(args.deterministic))
 
     global f
+    savedir = args.savename.split("/")[:-1]
+    savedir = "/".join(savedir)
+    os.makedirs(savedir, exist_ok=True)
     f = open(args.savename + ".txt", "w")
     print("Settings:", file=f)
     print(str(sys.argv), file=f)
+
+    # add metadata
+    meta = {
+        "argv": sys.argv,
+        "args": vars(args),
+        "env": env_report(),
+    }
+    print("META:", file=f)
+    print(json.dumps(meta, indent=2), file=f)
 
     if args.input:
         loaded = torch.load(args.input)
@@ -243,7 +265,15 @@ def main():
         )
     else:
         print("Using standard PyTorch initialization for hidden weights")
-    net, loss_list, history, grad_list, metrics = train_minibatch(
+    (
+        net,
+        loss_list,
+        history,
+        grad_list,
+        metrics,
+        rng_init,
+        init_hidden,
+    ) = train_minibatch(
         X, Y, h0, n_epochs, net, criterion, optimizer, RecordEp, args.Hregularized
     )
     end = time.time()
@@ -257,8 +287,14 @@ def main():
         "history": history,
         "grad_list": grad_list,
         "metrics": metrics,
+        "rng_init": rng_init,
+        "init_hidden": init_hidden,
     }
     torch.save(save_dict, args.savename + ".pth.tar")
+
+    # save metadata
+    with open(args.savename + ".meta.json", "w") as mf:
+        json.dump(meta, mf, indent=2)
 
     # plot loss function iteration curve
     plt.figure()
@@ -340,6 +376,7 @@ def train_minibatch(
     criterion_l1 = nn.L1Loss(reduction="mean")
     start = time.time()
     epoch, stop = 0, 0
+    prev_grad_stats = None
 
     # respect existing clip flag if provided externally via args
     if use_clip is None:
@@ -354,7 +391,14 @@ def train_minibatch(
     else:
         init_hidden = net.hidden_linear.weight.detach().cpu().clone()
 
-    from tqdm import tqdm
+    rng_init = {
+        "py_random": random.getstate(),
+        "np_random": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all()
+        if torch.cuda.is_available()
+        else None,
+    }
 
     # main training loop with tqdm progress bar
     with tqdm(total=n_epochs, desc="Training", unit="epoch") as pbar:
@@ -396,7 +440,9 @@ def train_minibatch(
 
                 # record grad for recording epoch on chosen minibatch
                 if (epoch % RecordEp == 0) and (b == sample_batch_idx):
-                    record_grads(net, grad_list)
+                    prev_grad_stats = record_grads(
+                        net, grad_list, prev_stats=prev_grad_stats
+                    )
 
                 # compute grad norm before clipping
                 gn = _total_grad_norm(net.parameters(), p=2.0)
@@ -466,6 +512,18 @@ def train_minibatch(
                     act_mean = float(h_dbg.mean().item())
                     act_std = float(h_dbg.std().item())
                     tanh_sat = float((h_dbg.abs() > 0.99).float().mean().item())
+                    s, _, _ = torch.svd(Wh)
+                    s_max = float(s.max().item())
+                    s_min = float(s.min().item()) if s.numel() > 0 else float("nan")
+                    cond = float(s_max / (s_min + 1e-12))
+
+                    # Hidden weight aggregates
+                    max_abs_w = float(Wh.abs().max().item())
+                    sparsity_w = float((Wh.abs() < 1e-8).float().mean().item())
+
+                # Batch-loss dispersion within this epoch
+                loss_mean = float(np.mean(batch_losses))
+                loss_std = float(np.std(batch_losses))
 
                 # save raw hidden matrix for offline analysis
                 os.makedirs(args.output_dir, exist_ok=True)
@@ -476,10 +534,17 @@ def train_minibatch(
                     {
                         "epoch": epoch,
                         "loss": epoch_loss,
+                        "loss_batch_mean": loss_mean,
+                        "loss_batch_std": loss_std,
                         "frob": frob_norm,
                         "drift_from_init": drift,
                         "spectral_radius": rho,
+                        "spectral_norm": s_max,
+                        "min_singular": s_min,
+                        "cond_num": cond,
                         "orth_err": orth_err,
+                        "w_max_abs": max_abs_w,
+                        "w_sparsity": sparsity_w,
                         "act_mean": act_mean,
                         "act_std": act_std,
                         "tanh_sat": tanh_sat,
@@ -487,7 +552,7 @@ def train_minibatch(
                 )
             epoch += 1
 
-    return net, loss_list, history, grad_list, metrics
+    return net, loss_list, history, grad_list, metrics, rng_init, init_hidden
 
 
 def _total_grad_norm(params, p=2.0):
@@ -541,26 +606,58 @@ def _frob(W: torch.Tensor) -> float:
     return float(torch.norm(W, p="fro").item())
 
 
-def record_grads(net, grad_list):
+def record_grads(net, grad_list, prev_stats=None):
     """
-    Collect gradient statistics (mean, std, norm, mean_sq) for each parameter
-    and append them to grad_list.
-
-    Args:
-        net (nn.Module): Model whose gradients we want to record.
-        grad_list (list): A list that will store gradient dictionaries.
+    Record per-parameter gradient stats; optionally compute cosine similarity vs previous.
+    Returns current stats so caller can keep for next comparison.
     """
     stats = {}
+    layer_group_norms = {}  # aggregate norms per 'layer' prefix
+
     for name, p in net.named_parameters():
         if p.requires_grad and p.grad is not None:
-            g = p.grad.detach().cpu().numpy()
+            g = p.grad.detach().flatten().cpu()
+            g_np = g.numpy()
+            l2 = float(torch.norm(g, p=2).item())
+            mean = float(g_np.mean())
+            std = float(g_np.std())
+            mean_sq = float((g_np**2).mean())
+            max_abs = float(np.max(np.abs(g_np)))
+            sparsity = float(np.mean(np.isclose(g_np, 0.0)))
+
+            cos = None
+            if (
+                prev_stats is not None
+                and name in prev_stats
+                and "raw" in prev_stats[name]
+            ):
+                g_prev = prev_stats[name]["raw"]
+                # safe cosine
+                denom = (np.linalg.norm(g_np) * np.linalg.norm(g_prev)) + 1e-12
+                cos = float(np.dot(g_np, g_prev) / denom)
+
             stats[name] = {
-                "mean": float(g.mean()),
-                "std": float(g.std()),
-                "l2_norm": float(np.linalg.norm(g)),
-                "mean_sq": float((g**2).mean()),
+                "mean": mean,
+                "std": std,
+                "l2_norm": l2,
+                "mean_sq": mean_sq,
+                "max_abs": max_abs,
+                "sparsity": sparsity,
+                "cos_prev": cos,  # can be None on first record
+                "raw": g_np,  # keep raw for next cosine; will be stripped before saving
             }
-        grad_list.append(stats)
+
+            # simple grouping: take prefix before first dot
+            group = name.split(".")[0]
+            layer_group_norms.setdefault(group, 0.0)
+            layer_group_norms[group] += l2
+
+    # append a copy that omits raw vectors to keep checkpoints small
+    slim = {
+        k: {kk: vv for kk, vv in v.items() if kk != "raw"} for k, v in stats.items()
+    }
+    grad_list.append({"per_param": slim, "per_group_norm": layer_group_norms})
+    return stats  # return full (with raw) to compute cosine next time
 
 
 def step_YC(x):
@@ -568,35 +665,131 @@ def step_YC(x):
 
 
 def load_hidden_weight_into(
-    model, npy_path, device=None, zero_bias=True, trainable=True
+    model,
+    npy_path: str,
+    device=None,
+    zero_bias: bool = True,
+    trainable: bool = True,
+    layer: int = 0,
 ):
     """
-    Loads an (n,n) matrix from .npy and copies it into model.hidden_linear.weight.
+    Load an (H, H) numpy array into the model's *recurrent* hidden-to-hidden weight.
+
+    Supports:
+      - nn.RNN/nn.GRU/nn.LSTM via model.rnn.weight_hh_l{layer}
+      - Fallback: model.hidden_linear.weight (for custom modules)
+
+    Args:
+        model: torch.nn.Module with .rnn (RNN/GRU/LSTM) or .hidden_linear
+        npy_path: path to .npy containing an (H,H) matrix
+        device: torch.device or None to infer from model
+        zero_bias: if True, zero recurrent bias (and input bias if present)
+        trainable: if False, freeze the loaded parameters
+        layer: RNN layer index (default 0)
+
+    Returns:
+        model (mutated in-place)
     """
-    W = np.load(npy_path).astype(np.float32)
-    thW = torch.from_numpy(W)
+
+    W = np.load(npy_path)
+    if W.ndim != 2 or W.shape[0] != W.shape[1]:
+        raise ValueError(f"Expected square (H,H) matrix, got shape {W.shape}")
+
+    thW = torch.as_tensor(W, dtype=torch.float32)
 
     if device is None:
         device = next(model.parameters()).device
     thW = thW.to(device)
 
-    if model.hidden_linear.weight.shape != thW.shape:
-        raise ValueError(
-            f"Shape mismatch: layer {tuple(model.hidden_linear.weight.shape)} vs file {tuple(thW.shape)}"
-        )
+    # Try RNN/GRU/LSTM first
+    target_weight = None
+    rnn_mod = getattr(model, "rnn", None)
+    if isinstance(rnn_mod, (nn.RNN, nn.GRU, nn.LSTM)):
+        # names like weight_hh_l0, bias_hh_l0, weight_ih_l0, bias_ih_l0
+        w_name = f"weight_hh_l{layer}"
+        if not hasattr(rnn_mod, w_name):
+            raise AttributeError(f"Model.rnn has no attribute {w_name}")
+        target_weight = getattr(rnn_mod, w_name)
 
-    with torch.no_grad():
-        model.hidden_linear.weight.copy_(thW)
-        if zero_bias and model.hidden_linear.bias is not None:
-            model.hidden_linear.bias.zero_()
+        # Shape check (GRU/LSTM have 3H or 4H rows; Elman RNN should be HxH)
+        if target_weight.shape != thW.shape:
+            raise ValueError(
+                f"Shape mismatch for {w_name}: model {tuple(target_weight.shape)} vs file {tuple(thW.shape)}"
+            )
 
-    # make it trainable or frozen
-    model.hidden_linear.weight.requires_grad = bool(trainable)
-    if model.hidden_linear.bias is not None:
-        model.hidden_linear.bias.requires_grad = bool(trainable)
+        with torch.no_grad():
+            target_weight.copy_(thW)
 
-    print(f"Loaded {npy_path} into hidden_linear.weight (trainable={trainable})")
-    return model
+        # Optionally zero biases (both hh and ih if present)
+        if zero_bias:
+            for b_name in (f"bias_hh_l{layer}", f"bias_ih_l{layer}"):
+                if hasattr(rnn_mod, b_name):
+                    b = getattr(rnn_mod, b_name)
+                    if b is not None:
+                        b.detach().zero_()
+
+        # Set requires_grad
+        target_weight.requires_grad = bool(trainable)
+        for b_name in (f"bias_hh_l{layer}", f"bias_ih_l{layer}"):
+            if hasattr(rnn_mod, b_name):
+                getattr(rnn_mod, b_name).requires_grad = bool(trainable)
+
+        print(f"Loaded {npy_path} into rnn.{w_name} (trainable={trainable})")
+        return model
+
+    # Fallback: custom module with hidden_linear (use with ElmanRNN_tp1)
+    hidden_linear = getattr(model, "hidden_linear", None)
+    if hidden_linear is not None and hasattr(hidden_linear, "weight"):
+        if hidden_linear.weight.shape != thW.shape:
+            raise ValueError(
+                f"Shape mismatch for hidden_linear.weight: model {tuple(hidden_linear.weight.shape)} vs file {tuple(thW.shape)}"
+            )
+        with torch.no_grad():
+            hidden_linear.weight.copy_(thW)
+            if zero_bias and hidden_linear.bias is not None:
+                hidden_linear.bias.zero_()
+        hidden_linear.weight.requires_grad = bool(trainable)
+        if hidden_linear.bias is not None:
+            hidden_linear.bias.requires_grad = bool(trainable)
+        print(f"Loaded {npy_path} into hidden_linear.weight (trainable={trainable})")
+        return model
+
+    # Not target found
+    raise AttributeError(
+        "Could not locate a recurrent hidden weight to load into. "
+        "Expected model.rnn.weight_hh_l{layer} (RNN/GRU/LSTM) or model.hidden_linear.weight."
+    )
+
+
+def set_seed(seed: int = 1337, deterministic: bool = True):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    # Determinism
+    try:
+        torch.use_deterministic_algorithms(deterministic)
+    except Exception:
+        pass
+    torch.backends.cudnn.deterministic = bool(deterministic)
+    torch.backends.cudnn.benchmark = False
+
+
+def env_report():
+    info = {
+        "timestamp": datetime.now().isoformat(),
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "torch": getattr(torch, "__version__", None),
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
+        "cudnn_version": torch.backends.cudnn.version()
+        if torch.cuda.is_available()
+        else None,
+        "gpu_name": torch.cuda.get_device_name() if torch.cuda.is_available() else None,
+    }
+    return info
 
 
 if __name__ == "__main__":

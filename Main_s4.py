@@ -130,6 +130,9 @@ parser.add_argument(
     default=None,
     help="Path to a .npy file containing a hidden weight matrix. If None, use default PyTorch initialization (He)",
 )
+parser.add_argument(
+    "--early_stop", default=0, type=int, help="whether to include early stopping"
+)
 
 
 def main():
@@ -346,7 +349,7 @@ def train_minibatch(
             use_clip = None
 
     # save initial hidden weights for "drift from init" measurement
-    if 'pytorch' in args.net:
+    if "pytorch" in args.net:
         init_hidden = net.rnn.weight_hh_l0.detach().cpu().clone()
     else:
         init_hidden = net.hidden_linear.weight.detach().cpu().clone()
@@ -424,7 +427,11 @@ def train_minibatch(
             pbar.update(1)
 
             # early stopping
-            if epoch > 1000 and all(np.abs(np.diff(loss_list[-10:])) < 1e-7):
+            if args.early_stop == 0:
+                tolerance = -1.0  # impossible tolerence to remove
+            else:
+                tolerance = 1e-7
+            if epoch > 1000 and all(np.abs(np.diff(loss_list[-10:])) < tolerance):
                 stop = 1
                 print("Hit the stopping criterion < 1e-7", file=f)
             if epoch % RecordEp == 0:
@@ -439,7 +446,7 @@ def train_minibatch(
                     history["grad_norm"].append(grad_norm_for_record)
 
                 # hidden weight analysis
-                if 'pytorch' in args.net:
+                if "pytorch" in args.net:
                     Wh = net.rnn.weight_hh_l0.detach().cpu()
                 else:
                     Wh = net.hidden_linear.weight.detach().cpu()
@@ -510,8 +517,15 @@ def _spectral_radius(W: torch.Tensor) -> float:
     Returns:
         float: Spectral radius of W.
     """
-    eigvals = torch.linalg.eigvals(W)
-    return eigvals
+    if W.is_complex():
+        # torch.eig only supports real matrices; use NumPy for complex
+        vals = np.linalg.eigvals(W.numpy())
+        return float(np.abs(vals).max())
+    else:
+        # torch.eig returns (n,2): columns are [real, imag]
+        e = torch.eig(W, eigenvectors=False)[0]
+        r = torch.sqrt(e[:, 0] ** 2 + e[:, 1] ** 2).max()
+        return float(r.item())
 
 
 def _frob(W: torch.Tensor) -> float:

@@ -157,6 +157,8 @@ def main():
     savedir = args.savename.split("/")[:-1]
     savedir = "/".join(savedir)
     os.makedirs(savedir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
+    print(args.output_dir)
     f = open(args.savename + ".txt", "w")
     print("Settings:", file=f)
     print(str(sys.argv), file=f)

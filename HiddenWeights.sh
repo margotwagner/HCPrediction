@@ -360,3 +360,85 @@ for i in $(printf "%02d\n" {5..9}); do nohup python Main_s4.py \
 --hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_orthog_n100_xavier.npy \
 --output_dir Elman_SGD/Remap_predloss/N100T100/orthog/khot/multiruns/run_$i/hidden-weights \
 --savename Elman_SGD/Remap_predloss/N100T100/orthog/khot/multiruns/run_$i/Ns100_SeqN100_predloss_full; done
+
+################################################################################################################################################################################################################################################
+
+# Multiple runs small gauss (k=5) inputs
+# Standard He initialization (5gauss, multiruns)
+for i in $(printf "%02d\n" {0..9}); do nohup python Main_s4.py \
+--input data/Ns100_SeqN100/Ns100_SeqN100_5gauss.pth.tar \
+--batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--seed "$i" \
+--output_dir Elman_SGD/Remap_predloss/N100T100/he/small-gaussian/multiruns/run_$i/hidden-weights \
+--savename Elman_SGD/Remap_predloss/N100T100/he/small-gaussian/multiruns/run_$i/Ns100_SeqN100_predloss_full; done
+
+# Shift initialization (5gauss, multiruns)
+for i in $(printf "%02d\n" {0..9}); do nohup python Main_s4.py \
+--input data/Ns100_SeqN100/Ns100_SeqN100_5gauss.pth.tar \
+--batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--seed "$i" \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_shift_n100_xavier.npy \
+--output_dir Elman_SGD/Remap_predloss/N100T100/shift/small-gaussian/multiruns/run_$i/hidden-weights \
+--savename Elman_SGD/Remap_predloss/N100T100/shift/small-gaussian/multiruns/run_$i/Ns100_SeqN100_predloss_full; done
+
+# Cyclic shift initialization (5gauss, multiruns)
+for i in $(printf "%02d\n" {0..9}); do nohup python Main_s4.py \
+--input data/Ns100_SeqN100/Ns100_SeqN100_5gauss.pth.tar \
+--batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--seed "$i" \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_cyclic_shift_n100_xavier.npy \
+--output_dir Elman_SGD/Remap_predloss/N100T100/cyclic-shift/small-gaussian/multiruns/run_$i/hidden-weights \
+--savename Elman_SGD/Remap_predloss/N100T100/cyclic-shift/small-gaussian/multiruns/run_$i/Ns100_SeqN100_predloss_full; done
+
+# Cyclic Mexican Hat (5gauss, multiruns)
+for i in $(printf "%02d\n" {0..9}); do nohup python Main_s4.py \
+--input data/Ns100_SeqN100/Ns100_SeqN100_5gauss.pth.tar \
+--batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--seed "$i" \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_cmh_n100_xavier.npy \
+--output_dir Elman_SGD/Remap_predloss/N100T100/cmh/small-gaussian/multiruns/run_$i/hidden-weights \
+--savename Elman_SGD/Remap_predloss/N100T100/cmh/small-gaussian/multiruns/run_$i/Ns100_SeqN100_predloss_full; done
+
+# Standard Mexican Hat (5gauss, multiruns)
+for i in $(printf "%02d\n" {0..9}); do nohup python Main_s4.py \
+--input data/Ns100_SeqN100/Ns100_SeqN100_5gauss.pth.tar \
+--batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--seed "$i" \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_mh_n100_xavier.npy \
+--output_dir Elman_SGD/Remap_predloss/N100T100/mh/small-gaussian/multiruns/run_$i/hidden-weights \
+--savename Elman_SGD/Remap_predloss/N100T100/mh/small-gaussian/multiruns/run_$i/Ns100_SeqN100_predloss_full; done
+
+# Cyclic Tridiagonal (5gauss, multiruns)
+for i in $(printf "%02d\n" {0..9}); do nohup python Main_s4.py \
+--input data/Ns100_SeqN100/Ns100_SeqN100_5gauss.pth.tar \
+--batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--seed "$i" \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_ctridiag_n100_xavier.npy \
+--output_dir Elman_SGD/Remap_predloss/N100T100/ctridiag/small-gaussian/multiruns/run_$i/hidden-weights \
+--savename Elman_SGD/Remap_predloss/N100T100/ctridiag/small-gaussian/multiruns/run_$i/Ns100_SeqN100_predloss_full; done
+
+# Tridiagonal (5gauss, multiruns)
+for i in $(printf "%02d\n" {0..9}); do nohup python Main_s4.py \
+--input data/Ns100_SeqN100/Ns100_SeqN100_5gauss.pth.tar \
+--batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--seed "$i" \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_tridiag_n100_xavier.npy \
+--output_dir Elman_SGD/Remap_predloss/N100T100/tridiag/small-gaussian/multiruns/run_$i/hidden-weights \
+--savename Elman_SGD/Remap_predloss/N100T100/tridiag/small-gaussian/multiruns/run_$i/Ns100_SeqN100_predloss_full; done
+
+# Orthogonal (5gauss, multiruns)
+for i in $(printf "%02d\n" {0..9}); do nohup python Main_s4.py \
+--input data/Ns100_SeqN100/Ns100_SeqN100_5gauss.pth.tar \
+--batch-size 1 --net ElmanRNN_pytorch_module_v2 \
+--pred 1 --fixi 1 --hidden-n 100 \
+--seed "$i" \
+--hidden_init data/Ns100_SeqN100/hidden-weight-inits/hidden_orthog_n100_xavier.npy \
+--output_dir Elman_SGD/Remap_predloss/N100T100/orthog/small-gaussian/multiruns/run_$i/hidden-weights \
+--savename Elman_SGD/Remap_predloss/N100T100/orthog/small-gaussian/multiruns/run_$i/Ns100_SeqN100_predloss_full; done

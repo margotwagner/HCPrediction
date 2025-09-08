@@ -4,8 +4,8 @@
 # Standard He initialization (Gaussian activation)
 python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 \
 --pred 1 --fixi 1 --hidden-n 100 \
---output_dir Elman_SGD/Remap_predloss/N100T100/shift/gaussian/single-run/hidden-weights/ \
---savename Elman_SGD/Remap_predloss/N100T100/shift/gaussian/single-run/Ns100_SeqN100_predloss_full
+--output_dir Elman_SGD/Remap_predloss/N100T100/he/gaussian/single-run/hidden-weights/ \
+--savename Elman_SGD/Remap_predloss/N100T100/he/gaussian/single-run/Ns100_SeqN100_predloss_full
 
 # Shift (Gaussian)
 python Main_s4.py --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_pytorch_module_v2 \
@@ -148,7 +148,7 @@ for i in $(printf "%02d\n" {0..9}); do nohup python Main_s4.py \
 --savename Elman_SGD/Remap_predloss/N100T100/cyclic-shift/gaussian/multiruns/run_$i/Ns100_SeqN100_predloss_full; done
 
 # Cyclic Mexican Hat (Gaussian, multiruns)
-for i in $(printf "%02d\n" {4..9}); do nohup python Main_s4.py \
+for i in $(printf "%02d\n" {0..9}); do nohup python Main_s4.py \
 --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar \
 --batch-size 1 --net ElmanRNN_pytorch_module_v2 \
 --pred 1 --fixi 1 --hidden-n 100 \
@@ -158,7 +158,7 @@ for i in $(printf "%02d\n" {4..9}); do nohup python Main_s4.py \
 --savename Elman_SGD/Remap_predloss/N100T100/cmh/gaussian/multiruns/run_$i/Ns100_SeqN100_predloss_full; done
 
 # Standard Mexican Hat (Gaussian, multiruns)
-for i in $(printf "%02d\n" {4..9}); do nohup python Main_s4.py \
+for i in $(printf "%02d\n" {0..9}); do nohup python Main_s4.py \
 --input data/Ns100_SeqN100/Ns100_SeqN100_1.pth.tar \
 --batch-size 1 --net ElmanRNN_pytorch_module_v2 \
 --pred 1 --fixi 1 --hidden-n 100 \
@@ -351,7 +351,7 @@ for i in $(printf "%02d\n" {0..9}); do nohup python Main_s4.py \
 --output_dir Elman_SGD/Remap_predloss/N100T100/tridiag/khot/multiruns/run_$i/hidden-weights \
 --savename Elman_SGD/Remap_predloss/N100T100/tridiag/khot/multiruns/run_$i/Ns100_SeqN100_predloss_full; done
 
-# Orthogonal (one-hot, multiruns)
+# Orthogonal (k-hot, multiruns)
 for i in $(printf "%02d\n" {5..9}); do nohup python Main_s4.py \
 --input data/Ns100_SeqN100/Ns100_SeqN100_5hot.pth.tar \
 --batch-size 1 --net ElmanRNN_pytorch_module_v2 \

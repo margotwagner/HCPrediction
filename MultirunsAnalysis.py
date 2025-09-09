@@ -1,69 +1,89 @@
 # ============================================================
-# Multirun analysis: metrics, plots, and comparisons
+# Multirun analysis: combine and save metrics
 # ============================================================
 
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 import numpy as np
-import pandas as pd
 import torch
-import matplotlib.pyplot as plt
+import pandas as pd
 
 # -------------------
 # CONFIG
 # -------------------
-data_dir = Path("../data/Ns100_SeqN100/")  # input data root (not strictly needed here)
-model_root = Path("../Elman_SGD/Remap_predloss/N100T100/")  # model outputs root
+data_dir = Path("../data/Ns100_SeqN100/")
+model_root = Path("../Elman_SGD/Remap_predloss/N100T100/")
 
-hidden_weight_inits = ["he", "shift", "cyclic-shift"]  # extend if you have more
+hidden_weights_inits = [
+    "he",
+    "shift",
+    "cyclic-shift",
+    "shift",
+    "cmh",
+    "mh",
+    "ctridiag",
+    "tridiag",
+    "orthog",
+]
 input_types = ["gaussian", "onehot", "khot", "small-gaussian"]
 
-# Directory / file naming
-SINGLE_DIR_CANDIDATES = ["single-runs", "single-run"]  # tolerate either
+SINGLE_DIR = "single-run"
 MULTIRUNS_DIR = "multiruns"
 RUN_PREFIX = "run_"
-MODEL_FILENAME = "Ns100_SeqN100_predloss_full.pth.tar"
-HIDDEN_WEIGHTS_SUBDIR = "hidden-weights"  # per-epoch saved weights (optional to use)
+MODEL_FNAME = "Ns100_SeqN100_predloss_full.pth.tar"
+HIDDEN_WEIGHTS_SUBDIR = "hidden-weights"
 
-# Output roots for analysis artifacts
-FIG_ROOT = model_root / "figs"
+# Output dir for CSVs
 CSV_ROOT = model_root / "csv"
 
 
 # -------------------
 # I/O helpers
 # -------------------
-def _ensure_dir(p: Path):
-    p.mkdir(parents=True, exist_ok=True)
 
 
-def _safe_load(p: Path):
+def _load_torch(p):
+    """Load torch file; returns None if missing or corrupt."""
     try:
-        return torch.load(p, map_location="cpu")
+        return torch.load(p)
     except Exception as e:
         print(f"[WARN] Could not load {p}: {e}")
         return None
 
 
 def _extract_loss_series(ckpt) -> Optional[List[float]]:
+    """Extract loss series from checkpoint dict. Returns None if not found."""
     if ckpt is None:
         return None
-    for k in ["loss", "train_loss", "history_loss"]:
-        if k in ckpt and isinstance(ckpt[k], (list, tuple)):
-            return [float(x) for x in ckpt[k]]
-    return None
+    if "loss" in ckpt:
+        return [float(x) for x in ckpt["loss"]]
+    else:
+        print("[WARN] No loss series found in checkpoint.")
+        return None
 
 
-def _extract_history(ckpt) -> Optional[Dict]:
+def _extract_history(ckpt) -> Optional[Dict[str, List]]:
+    """Returns dict with keys present in history: 'epoch', 'grad_norm', 'loss', etc. Only keeps the list-like fields of equal length to 'epoch'."""
     if ckpt is None:
         return None
-    return ckpt.get("history", None)
+    history = ckpt.get("history", None)
+    if not history or "epoch" not in history or not isinstance(history["epoch"], list):
+        return None
+    L = len(history["epoch"])
+    out = {"epoch": list(map(int, history["epoch"]))}
+    for k, v in history.items():
+        if k == "epoch":
+            continue
+        if isinstance(v, list) and len(v) == L:
+            out[k] = list(v)
+    return out
 
 
 def _extract_metrics_list(ckpt) -> Optional[List[Dict]]:
+    """Extract metrics list from checkpoint dict. Returns None if not found."""
     if ckpt is None:
         return None
-    # metrics saved as a list of dicts (per recorded epoch)
+    # save metric as list of dicts (per recorded epoch)
     m = ckpt.get("metrics", None)
     if isinstance(m, list) and (len(m) == 0 or isinstance(m[0], dict)):
         return m
@@ -71,6 +91,7 @@ def _extract_metrics_list(ckpt) -> Optional[List[Dict]]:
 
 
 def _extract_grad_list(ckpt) -> Optional[List[Dict]]:
+    """Extract gradient norms list from checkpoint dict. Returns None if not found."""
     if ckpt is None:
         return None
     g = ckpt.get("grad_list", None)
@@ -79,22 +100,19 @@ def _extract_grad_list(ckpt) -> Optional[List[Dict]]:
     return None
 
 
-def _find_single_run_file(base: Path) -> Optional[Path]:
-    for s in SINGLE_DIR_CANDIDATES:
-        cand = base / s / MODEL_FILENAME
-        if cand.exists():
-            return cand
-    return None
-
-
-def _iter_multirun_files(base: Path):
-    mult = base / MULTIRUNS_DIR
-    if not mult.exists():
+def _iter_multirun_files(base_dir: Path):
+    """Yield (run_id, path) pairs for each run file found under multiruns/run_XX."""
+    multiruns_dir = base_dir / MULTIRUNS_DIR
+    if not multiruns_dir.exists():
+        print(f"[WARN] Multirun dir does not exist: {multiruns_dir}")
         return
-    for run_dir in sorted(mult.glob(f"{RUN_PREFIX}*")):
-        p = run_dir / MODEL_FILENAME
-        if p.exists():
-            yield run_dir.name.replace(RUN_PREFIX, "", 1), p  # ('00', path)
+    for run_dir in sorted(multiruns_dir.glob(f"{RUN_PREFIX}*")):
+        path = run_dir / MODEL_FNAME
+        if path.exists():
+            run_id = run_dir.name.replace(
+                RUN_PREFIX, "", 1
+            )  # Extract run ID ('00' from 'run_00')
+            yield run_id, path
 
 
 # -------------------

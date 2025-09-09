@@ -62,23 +62,6 @@ def _extract_loss_series(ckpt) -> Optional[List[float]]:
         return None
 
 
-def _extract_history(ckpt) -> Optional[Dict[str, List]]:
-    """Returns dict with keys present in history: 'epoch', 'grad_norm', 'loss', etc. Only keeps the list-like fields of equal length to 'epoch'."""
-    if ckpt is None:
-        return None
-    history = ckpt.get("history", None)
-    if not history or "epoch" not in history or not isinstance(history["epoch"], list):
-        return None
-    L = len(history["epoch"])
-    out = {"epoch": list(map(int, history["epoch"]))}
-    for k, v in history.items():
-        if k == "epoch":
-            continue
-        if isinstance(v, list) and len(v) == L:
-            out[k] = list(v)
-    return out
-
-
 def _extract_metrics_list(ckpt) -> Optional[List[Dict]]:
     """Extract metrics list from checkpoint dict. Returns None if not found."""
     if ckpt is None:
@@ -98,6 +81,60 @@ def _extract_grad_list(ckpt) -> Optional[List[Dict]]:
     if isinstance(g, list):
         return g
     return None
+
+
+def _extract_history(ckpt, keep=("epoch", "loss", "grad_norm"), summarize=False):
+    """
+    Return a compact history dict with only scalar series that align with 'epoch'.
+
+    If summarize=True, include light summaries for large tensors (means/stds), computed per epoch to a *few* numbers.
+    """
+    if ckpt is None:
+        return None
+    history = ckpt.get("history")
+    if not history or "epoch" not in history or not isinstance(history["epoch"], list):
+        return None
+    L = len(history["epoch"])
+    out = {"epoch": [int(e) for e in history["epoch"]]}
+
+    # keep scalar lists
+    for k in keep:
+        if k == "epoch":
+            continue
+        v = history.get(k)
+        if isinstance(v, list) and len(v) == L:
+            # allow Python floats/ints or 0-dim tensors
+            cleaned = []
+            for x in v:
+                if isinstance(x, (float, int)):
+                    cleaned.append(float(x))
+                elif torch.is_tensor(x) and x.numel() == 1:
+                    cleaned.append(float(x.item()))
+                else:
+                    # skip non-scalar entries
+                    cleaned.append(float("nan"))
+            out[k] = cleaned
+
+    if summarize:
+        # Example: summarize hidden and y_hat by mean
+        def _summarize_tensor_list(tlist, name):
+            if not isinstance(tlist, list) or len(tlist) != L:
+                return
+            means = []
+            stds = []
+            for t in tlist:
+                if torch.is_tensor(t):
+                    means.append(float(t.mean().item()))
+                    stds.append(float(t.std(unbiased=False).item()))
+                else:
+                    means.append(float("nan"))
+                    stds.append(float("nan"))
+            out[f"{name}_mean"] = means
+            out[f"{name}_std"] = stds
+
+        _summarize_tensor_list(history.get("hidden"), "hidden")
+        _summarize_tensor_list(history.get("y_hat"), "y_hat")
+    return out
 
 
 def _iter_multirun_files(base_dir: Path):
@@ -201,58 +238,57 @@ def collect_for_setting(hidden_init: str, input_type: str):
     grad_df_list = []
 
     for run_id, p in _iter_multirun_files(base):
-        if run_id == "00":
-            print(f"Run {run_id}: {p}")
-            # Load checkpoint
-            ckpt = _load_torch(p)
-            print(f"  Keys: {list(ckpt.keys())}")
+        print(f"Run {run_id}: {p}")
+        # Load checkpoint
+        ckpt = _load_torch(p)
 
-            # Extract loss series
-            loss_series = _extract_loss_series(ckpt)
-            if loss_series:
-                losses_all.append(loss_series)
+        # Extract loss series
+        loss_series = _extract_loss_series(ckpt)
+        if loss_series:
+            losses_all.append(loss_series)
 
-            # Load loss metrics from loss_series
-            m = _metrics_from_loss(loss_series)
-            if m:
-                per_run_rows.append(
-                    {
-                        "hidden_init": hidden_init,
-                        "input_type": input_type,
-                        "run_kind": "multirun",
-                        "run_id": run_id,
-                        "path": str(p),
-                        **m,
-                    }
-                )
+        # Load loss metrics from loss_series
+        m = _metrics_from_loss(loss_series)
+        if m:
+            per_run_rows.append(
+                {
+                    "hidden_init": hidden_init,
+                    "input_type": input_type,
+                    "run_kind": "multirun",
+                    "run_id": run_id,
+                    "path": str(p),
+                    **m,
+                }
+            )
 
-            # Get metrics time series (over recorded epochs)
-            mlist = _extract_metrics_list(ckpt)
-            if mlist:
-                metrics_df_list.append(_metrics_df_from_list(mlist, run_id))
+        # Get metrics time series (over recorded epochs)
+        mlist = _extract_metrics_list(ckpt)
+        if mlist:
+            metrics_df_list.append(_metrics_df_from_list(mlist, run_id))
 
-            # Get gradient norms time series (over recorded epochs)
-            glist = _extract_grad_list(ckpt)
-            if glist and isinstance(glist[0], dict):
-                reduced = [_reduce_grad_snapshot_paramwise(snap) for snap in glist]
-                gdf = _attach_epoch_to_list(
-                    reduced, epoch_list=ckpt.get("history", {}).get("epoch", None)
-                )
-                if gdf is not None:
-                    gdf["run_id"] = run_id
-                    grad_df_list.append(gdf)
+        # Get gradient norms time series (over recorded epochs)
+        glist = _extract_grad_list(ckpt)
+        if glist and isinstance(glist[0], dict):
+            reduced = [_reduce_grad_snapshot_paramwise(snap) for snap in glist]
+            gdf = _attach_epoch_to_list(
+                reduced, epoch_list=ckpt.get("history", {}).get("epoch", None)
+            )
+            if gdf is not None:
+                gdf["run_id"] = run_id
+                grad_df_list.append(gdf)
 
-            # Get history (epoch, grad_norm, loss, etc.)
-            history = _extract_history(ckpt)
-            if history:
-                hist_df = pd.DataFrame(history)
-                hist_df["run_id"] = run_id
-        return per_run_rows, {
-            "losses": losses_all,
-            "metrics_df_list": metrics_df_list,
-            "grad_df_list": grad_df_list,
-            "history_df": hist_df,
-        }
+        # Get history (epoch, grad_norm, loss, etc.)
+        history = _extract_history(
+            ckpt, keep=("epoch", "loss", "grad_norm"), summarize=False
+        )
+        hist_df = pd.DataFrame(history) if history else pd.DataFrame()
+        hist_df["run_id"] = run_id
+    return per_run_rows, {
+        "losses": losses_all,
+        "metrics_df_list": metrics_df_list,
+        "grad_df_list": grad_df_list,
+        "history_df": hist_df,
+    }
 
 
 # -------------------

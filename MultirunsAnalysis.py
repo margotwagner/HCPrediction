@@ -19,19 +19,19 @@ hidden_weight_inits = ["he", "shift", "cyclic-shift"]  # extend if you have more
 input_types = ["gaussian", "onehot", "khot", "small-gaussian"]
 
 # Directory / file naming
-SINGLE_DIR = "single-run"
+SINGLE_DIR_CANDIDATES = ["single-runs", "single-run"]  # tolerate either
 MULTIRUNS_DIR = "multiruns"
 RUN_PREFIX = "run_"
 MODEL_FILENAME = "Ns100_SeqN100_predloss_full.pth.tar"
-HIDDEN_WEIGHTS_SUBDIR = "hidden-weights"
+HIDDEN_WEIGHTS_SUBDIR = "hidden-weights"  # per-epoch saved weights (optional to use)
 
-# Results dirs
+# Output roots for analysis artifacts
 FIG_ROOT = model_root / "figs"
 CSV_ROOT = model_root / "csv"
 
 
 # -------------------
-# File handling utility functions
+# I/O helpers
 # -------------------
 def _ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
@@ -45,13 +45,12 @@ def _safe_load(p: Path):
         return None
 
 
-def _extract_loss_series(ckpt):
+def _extract_loss_series(ckpt) -> Optional[List[float]]:
     if ckpt is None:
         return None
-    if "loss" in ckpt:
-        return [float(x) for x in ckpt["loss"]]
-    else:
-        print("[WARN] No loss series found in checkpoint.")
+    for k in ["loss", "train_loss", "history_loss"]:
+        if k in ckpt and isinstance(ckpt[k], (list, tuple)):
+            return [float(x) for x in ckpt[k]]
     return None
 
 
@@ -80,10 +79,11 @@ def _extract_grad_list(ckpt) -> Optional[List[Dict]]:
     return None
 
 
-def _get_single_run_file(base: Path) -> Optional[Path]:
-    fname = base / SINGLE_DIR / MODEL_FILENAME
-    if fname.exists():
-        return fname
+def _find_single_run_file(base: Path) -> Optional[Path]:
+    for s in SINGLE_DIR_CANDIDATES:
+        cand = base / s / MODEL_FILENAME
+        if cand.exists():
+            return cand
     return None
 
 
@@ -98,7 +98,7 @@ def _iter_multirun_files(base: Path):
 
 
 # -------------------
-# Metrics utility functions
+# Core metrics utilities
 # -------------------
 def _metrics_from_loss(loss: Optional[List[float]]) -> Optional[Dict[str, float]]:
     if not loss:
@@ -183,7 +183,7 @@ def collect_for_setting(hidden_init: str, in_type: str):
     grad_df_list = []
 
     # single run (optional)
-    single_path = _get_single_run_file(base)
+    single_path = _find_single_run_file(base)
     if single_path:
         ckpt = _safe_load(single_path)
         loss = _extract_loss_series(ckpt)

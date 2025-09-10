@@ -12,8 +12,8 @@ import pickle
 # -------------------
 # CONFIG
 # -------------------
-DATA_DIR = Path("../data/Ns100_SeqN100/")
-MODEL_ROOT = Path("../Elman_SGD/Remap_predloss/N100T100/")
+DATA_DIR = Path("./data/Ns100_SeqN100/")
+MODEL_ROOT = Path("./Elman_SGD/Remap_predloss/N100T100/")
 
 HIDDEN_WEIGHT_INITS = [
     "he",
@@ -149,9 +149,9 @@ def _iter_multirun_files(base_dir: Path):
                 RUN_PREFIX, "", 1
             )  # Extract run ID ('00' from 'run_00')
             yield run_id, path
-            
-            
-def _iter_multirun_files_limited(base_dir: Path, max_runs: int = 10);
+
+
+def _iter_multirun_files_limited(base_dir: Path, max_runs: int = 10):
     """Yield (run_id, path) pairs for each run file found under multiruns/run_XX, up to max_runs."""
     multiruns_dir = base_dir / MULTIRUNS_DIR
     if not multiruns_dir.exists():
@@ -310,12 +310,10 @@ def _reduce_grad_snapshot_paramwise(
 # -------------------
 def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
-    
+
+
 def _save_df_csv(df: pd.DataFrame, path: Path) -> None:
     df.to_csv(path, index=False)
-    
-
-
 
 
 # -------------------
@@ -469,13 +467,14 @@ def collect_all(h_inits=None, in_types=None):
     agg_df = pd.DataFrame(agg_rows)
     return per_run_df, agg_df, ts_bucket
 
+
 # -------------------
 # MAIN
 # -------------------
 def main():
     print("Starting multirun aggregation...")
     per_run_df, agg_df, ts_bucket = collect_all()
-    
+
     # Save global aggregate CSVs
     print("Saving global aggregate CSVs...")
     _ensure_dir(CSV_ROOT)
@@ -488,23 +487,21 @@ def main():
     with open(CSV_ROOT / "ts_bucket.pkl", "wb") as f:
         pickle.dump(ts_bucket, f)
         print(f"[saved] {CSV_ROOT / 'ts_bucket.pkl'}")
-        
+
     # Save per setting to the correct multirun path
     # ts_bucket keys are (hidden_init, input_type)
     print("Saving per-setting CSVs and timeseries...")
     settings = list(ts_bucket.keys())
-    for (h, it) in settings:
+    for h, it in settings:
         combo_dir = MODEL_ROOT / h / it / MULTIRUNS_DIR / "aggregate_exports"
         _ensure_dir(combo_dir)
-        
+
         # Filter per_run_df & agg_df for this setting
         per_run_combo = per_run_df[
             (per_run_df["hidden_init"] == h) & (per_run_df["input_type"] == it)
         ]
-        agg_combo = agg_df[
-            (agg_df["hidden_init"] == h) & (agg_df["input_type"] == it)
-        ]
-        
+        agg_combo = agg_df[(agg_df["hidden_init"] == h) & (agg_df["input_type"] == it)]
+
         # Save CSVs
         if not per_run_combo.empty:
             _save_df_csv(per_run_combo, combo_dir / "per_run_metrics.csv")
@@ -512,19 +509,19 @@ def main():
         if not agg_combo.empty:
             _save_df_csv(agg_combo, combo_dir / "agg_metrics.csv")
             print(f"[saved] {combo_dir / 'agg_metrics.csv'}")
-            
+
         # Save timeseries bucket
         with open(combo_dir / "ts_bucket.pkl", "wb") as f:
             pickle.dump(ts_bucket[(h, it)], f)
             print(f"[saved] {combo_dir / 'ts_bucket.pkl'}")
-        
+
         print(f"Finished saving data for setting (hidden_init={h}, input_type={it})")
-    
+
     print("[main] Done.")
-    
+
+
 if __name__ == "__main__":
     main()
-        
 
 
 # -------------------

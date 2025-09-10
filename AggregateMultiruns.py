@@ -7,14 +7,15 @@ from typing import Optional, Tuple, Dict, List
 import numpy as np
 import torch
 import pandas as pd
+import pickle
 
 # -------------------
 # CONFIG
 # -------------------
-data_dir = Path("../data/Ns100_SeqN100/")
-model_root = Path("../Elman_SGD/Remap_predloss/N100T100/")
+DATA_DIR = Path("../data/Ns100_SeqN100/")
+MODEL_ROOT = Path("../Elman_SGD/Remap_predloss/N100T100/")
 
-hidden_weight_inits = [
+HIDDEN_WEIGHT_INITS = [
     "he",
     "cyclic-shift",
     "shift",
@@ -24,16 +25,15 @@ hidden_weight_inits = [
     "tridiag",
     "orthog",
 ]
-input_types = ["gaussian", "onehot", "khot", "small-gaussian"]
+INPUT_TYPES = ["gaussian", "onehot", "khot", "small-gaussian"]
 
-SINGLE_DIR = "single-run"
 MULTIRUNS_DIR = "multiruns"
 RUN_PREFIX = "run_"
 MODEL_FNAME = "Ns100_SeqN100_predloss_full.pth.tar"
 HIDDEN_WEIGHTS_SUBDIR = "hidden-weights"
 
 # Output dir for CSVs
-CSV_ROOT = model_root / "csv"
+CSV_ROOT = MODEL_ROOT / "RESULTS-10RUNS-09102025"
 
 
 # -------------------
@@ -149,6 +149,25 @@ def _iter_multirun_files(base_dir: Path):
                 RUN_PREFIX, "", 1
             )  # Extract run ID ('00' from 'run_00')
             yield run_id, path
+            
+            
+def _iter_multirun_files_limited(base_dir: Path, max_runs: int = 10);
+    """Yield (run_id, path) pairs for each run file found under multiruns/run_XX, up to max_runs."""
+    multiruns_dir = base_dir / MULTIRUNS_DIR
+    if not multiruns_dir.exists():
+        print(f"[WARN] Multirun dir does not exist: {multiruns_dir}")
+        return
+    count = 0
+    for run_dir in sorted(multiruns_dir.glob(f"{RUN_PREFIX}*")):
+        if count >= max_runs:
+            break
+        path = run_dir / MODEL_FNAME
+        if path.exists():
+            run_id = run_dir.name.replace(
+                RUN_PREFIX, "", 1
+            )  # Extract run ID ('00' from 'run_00')
+            yield run_id, path
+            count += 1
 
 
 def _attach_epoch_to_list(lst: List[Dict], epoch_list=None) -> Optional[pd.DataFrame]:
@@ -287,6 +306,19 @@ def _reduce_grad_snapshot_paramwise(
 
 
 # -------------------
+# Saving helpers
+# -------------------
+def _ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+    
+def _save_df_csv(df: pd.DataFrame, path: Path) -> None:
+    df.to_csv(path, index=False)
+    
+
+
+
+
+# -------------------
 # Collection for one (hidden_init, input_type)
 # -------------------
 def collect_for_setting(hidden_init: str, input_type: str):
@@ -300,7 +332,7 @@ def collect_for_setting(hidden_init: str, input_type: str):
             "grad_df_list": List of DataFrames with gradient norms time series
             "history_df_list": List of DataFrames with history time series
     """
-    base = model_root / hidden_init / input_type
+    base = MODEL_ROOT / hidden_init / input_type
     per_run_rows = []
     losses_all = []
     metrics_df_list = []
@@ -372,8 +404,8 @@ def collect_for_setting(hidden_init: str, input_type: str):
 # High-level collection across all settings
 # -------------------
 def collect_all(h_inits=None, in_types=None):
-    h_inits = h_inits or hidden_weight_inits
-    in_types = in_types or input_types
+    h_inits = h_inits or HIDDEN_WEIGHT_INITS
+    in_types = in_types or INPUT_TYPES
 
     all_rows = []
     ts_bucket = {}  # (hidden_init, input_type) -> per-run timeseries dict
@@ -436,6 +468,63 @@ def collect_all(h_inits=None, in_types=None):
             agg_rows.append(row)
     agg_df = pd.DataFrame(agg_rows)
     return per_run_df, agg_df, ts_bucket
+
+# -------------------
+# MAIN
+# -------------------
+def main():
+    print("Starting multirun aggregation...")
+    per_run_df, agg_df, ts_bucket = collect_all()
+    
+    # Save global aggregate CSVs
+    print("Saving global aggregate CSVs...")
+    _ensure_dir(CSV_ROOT)
+    if not per_run_df.empty:
+        _save_df_csv(per_run_df, CSV_ROOT / "per_run_metrics.csv")
+        print(f"[saved] {CSV_ROOT / 'per_run_metrics.csv'}")
+    if not agg_df.empty:
+        _save_df_csv(agg_df, CSV_ROOT / "agg_metrics.csv")
+        print(f"[saved] {CSV_ROOT / 'agg_metrics.csv'}")
+    with open(CSV_ROOT / "ts_bucket.pkl", "wb") as f:
+        pickle.dump(ts_bucket, f)
+        print(f"[saved] {CSV_ROOT / 'ts_bucket.pkl'}")
+        
+    # Save per setting to the correct multirun path
+    # ts_bucket keys are (hidden_init, input_type)
+    print("Saving per-setting CSVs and timeseries...")
+    settings = list(ts_bucket.keys())
+    for (h, it) in settings:
+        combo_dir = MODEL_ROOT / h / it / MULTIRUNS_DIR / "aggregate_exports"
+        _ensure_dir(combo_dir)
+        
+        # Filter per_run_df & agg_df for this setting
+        per_run_combo = per_run_df[
+            (per_run_df["hidden_init"] == h) & (per_run_df["input_type"] == it)
+        ]
+        agg_combo = agg_df[
+            (agg_df["hidden_init"] == h) & (agg_df["input_type"] == it)
+        ]
+        
+        # Save CSVs
+        if not per_run_combo.empty:
+            _save_df_csv(per_run_combo, combo_dir / "per_run_metrics.csv")
+            print(f"[saved] {combo_dir / 'per_run_metrics.csv'}")
+        if not agg_combo.empty:
+            _save_df_csv(agg_combo, combo_dir / "agg_metrics.csv")
+            print(f"[saved] {combo_dir / 'agg_metrics.csv'}")
+            
+        # Save timeseries bucket
+        with open(combo_dir / "ts_bucket.pkl", "wb") as f:
+            pickle.dump(ts_bucket[(h, it)], f)
+            print(f"[saved] {combo_dir / 'ts_bucket.pkl'}")
+        
+        print(f"Finished saving data for setting (hidden_init={h}, input_type={it})")
+    
+    print("[main] Done.")
+    
+if __name__ == "__main__":
+    main()
+        
 
 
 # -------------------

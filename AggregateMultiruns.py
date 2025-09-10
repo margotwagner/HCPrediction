@@ -14,9 +14,8 @@ import pandas as pd
 data_dir = Path("../data/Ns100_SeqN100/")
 model_root = Path("../Elman_SGD/Remap_predloss/N100T100/")
 
-hidden_weights_inits = [
+hidden_weight_inits = [
     "he",
-    "shift",
     "cyclic-shift",
     "shift",
     "cmh",
@@ -45,7 +44,7 @@ CSV_ROOT = model_root / "csv"
 def _load_torch(p):
     """Load torch file; returns None if missing or corrupt."""
     try:
-        return torch.load(p)
+        return torch.load(p, map_location="cpu")
     except Exception as e:
         print(f"[WARN] Could not load {p}: {e}")
         return None
@@ -152,15 +151,15 @@ def _iter_multirun_files(base_dir: Path):
             yield run_id, path
 
 
-def _attach_epoch_to_list(list: List[Dict], epoch_list=None) -> Optional[pd.DataFrame]:
+def _attach_epoch_to_list(lst: List[Dict], epoch_list=None) -> Optional[pd.DataFrame]:
     """Given a list of dicts (e.g. grad snapshots), attach epoch number if available."""
-    if not list:
+    if not lst:
         return None
-    df = pd.DataFrame(list)
-    if epoch_list and len(epoch_list) == len(list):
+    df = pd.DataFrame(lst)
+    if epoch_list and len(epoch_list) == len(lst):
         df["epoch"] = epoch_list
     else:
-        df["epoch"] = range(len(list))
+        df["epoch"] = range(len(lst))
     return df
 
 
@@ -197,24 +196,93 @@ def _metrics_df_from_list(metrics_list: List[Dict], run_id: str) -> pd.DataFrame
     return df
 
 
-def _reduce_grad_snapshot_paramwise(d: Dict[str, Dict[str, float]]) -> Dict[str, float]:
-    """Reduce a single gradient snapshot (param -> stats dict) into global scalars. Keeps robust, comparable summaries"""
-    if not d:
+def _summarize_metrics(
+    metrics_df: pd.DataFrame, loss_series: Optional[List[float]]
+) -> Dict[str, float]:
+    """Summarize metrics DataFrame (over epochs) into per-run scalars.
+    Returns a flat dict like: {'final_frob': ...}
+    """
+    if metrics_df is None or metrics_df.empty:
         return {}
+
+    # Define which metrics to summarize if present
+    metrics_cols = [
+        "loss",
+        "loss_batch_mean",
+        "loss_batch_std",
+        "frob",
+        "drift_from_init",
+        "spectral_radius",
+        "spectral_norm",
+        "min_singular",
+        "cond_num",
+        "orth_err",
+        "w_max_abs",
+        "w_sparsity",
+        "act_mean",
+        "act_std",
+        "tanh_sat",
+    ]
+    metric_cols = [c for c in metrics_cols if c in metrics_df.columns]
+
+    out = {}
+
+    # final = last row
+    last = metrics_df.iloc[-1]
+    for c in metric_cols:
+        out[f"final_{c}"] = float(last[c])
+
+    # best = row at best loss epoch
+    if loss_series and len(loss_series) == len(metrics_df):
+        best_epoch = int(np.argmin(loss_series))
+        best_row = metrics_df.iloc[best_epoch]
+        for c in metric_cols:
+            out[f"best_{c}"] = float(best_row[c])
+
+    # global summaries
+    for c in metric_cols:
+        out[f"{c}_mean"] = float(metrics_df[c].mean())
+        out[f"{c}_std"] = (
+            float(metrics_df[c].std(ddof=1)) if len(metrics_df) > 1 else 0.0
+        )
+        out[f"{c}_max"] = float(metrics_df[c].max())
+        out[f"{c}_min"] = float(metrics_df[c].min())
+
+    return out
+
+
+def _reduce_grad_snapshot_paramwise(
+    snap: Dict[str, Dict[str, float]]
+) -> Dict[str, float]:
+    """Reduce nested gradient snapshot into flat scalars.
+    Expects:
+        snap["per_param"] : dict(param -> stats dict with keys: mean, std, etc)snap["per_group_norm] : dict(group -> float) (optional)
+    """
+    if not isinstance(snap, dict) or "per_param" not in snap:
+        return ValueError("Gradient snapshot must be a dict with 'per_param' key.")
+
+    per_param = snap.get("per_param", {})
+
     keys = ["mean", "std", "l2_norm", "mean_sq", "max_abs", "sparsity"]
     out = {f"grad_{k}_sum": 0.0 for k in keys}
-    out.update({f"grad_{k}_mean": 0.0 for k in keys})
     out.update({f"grad_{k}_max": float("-inf") for k in keys})
+
     count = 0
-    for stats in d.values():
+    for stats in per_param.values():
         count += 1
         for k in keys:
             v = float(stats.get(k, 0.0))
             out[f"grad_{k}_sum"] += v
             out[f"grad_{k}_max"] = max(out[f"grad_{k}_max"], v)
-        if count > 0:
-            for k in keys:
-                out[f"grad_{k}_mean"] = out[f"grad_{k}_sum"] / count
+
+    # finalize means
+    for k in keys:
+        out[f"grad_{k}_mean"] = out[f"grad_{k}_sum"] / count if count > 0 else 0.0
+
+    # surface per-group L2 if provided
+    for grp, val in snap.get("per_group_norm", {}).items():
+        out[f"grad_group_{grp}_l2_norm"] = float(val)
+
     return out
 
 
@@ -230,12 +298,14 @@ def collect_for_setting(hidden_init: str, input_type: str):
             "losses": List of loss series (list of lists)
             "metrics_df_list": List of DataFrames with metrics time series
             "grad_df_list": List of DataFrames with gradient norms time series
+            "history_df_list": List of DataFrames with history time series
     """
     base = model_root / hidden_init / input_type
     per_run_rows = []
     losses_all = []
     metrics_df_list = []
     grad_df_list = []
+    history_df_list = []
 
     for run_id, p in _iter_multirun_files(base):
         print(f"Run {run_id}: {p}")
@@ -249,22 +319,27 @@ def collect_for_setting(hidden_init: str, input_type: str):
 
         # Load loss metrics from loss_series
         m = _metrics_from_loss(loss_series)
-        if m:
-            per_run_rows.append(
-                {
-                    "hidden_init": hidden_init,
-                    "input_type": input_type,
-                    "run_kind": "multirun",
-                    "run_id": run_id,
-                    "path": str(p),
-                    **m,
-                }
-            )
 
         # Get metrics time series (over recorded epochs)
         mlist = _extract_metrics_list(ckpt)
+        metrics_df = None
         if mlist:
-            metrics_df_list.append(_metrics_df_from_list(mlist, run_id))
+            metrics_df = _metrics_df_from_list(mlist, run_id)
+            metrics_df_list.append(metrics_df)
+
+        # Summarize per-epoch metrics into per-run scalars and merge into row
+        metrics_summary = _summarize_metrics(metrics_df, loss_series)
+        if m:
+            row = {
+                "hidden_init": hidden_init,
+                "input_type": input_type,
+                "run_kind": "multirun",
+                "run_id": run_id,
+                "path": str(p),
+                **m,
+                **metrics_summary,
+            }
+            per_run_rows.append(row)
 
         # Get gradient norms time series (over recorded epochs)
         glist = _extract_grad_list(ckpt)
@@ -277,17 +352,19 @@ def collect_for_setting(hidden_init: str, input_type: str):
                 gdf["run_id"] = run_id
                 grad_df_list.append(gdf)
 
-        # Get history (epoch, grad_norm, loss, etc.)
+        # Get history time series
         history = _extract_history(
             ckpt, keep=("epoch", "loss", "grad_norm"), summarize=False
         )
-        hist_df = pd.DataFrame(history) if history else pd.DataFrame()
-        hist_df["run_id"] = run_id
+        if history:
+            hist_df = pd.DataFrame(history)
+            hist_df["run_id"] = run_id
+            history_df_list.append(hist_df)
     return per_run_rows, {
         "losses": losses_all,
         "metrics_df_list": metrics_df_list,
         "grad_df_list": grad_df_list,
-        "history_df": hist_df,
+        "history_df_list": history_df_list,
     }
 
 
@@ -300,8 +377,11 @@ def collect_all(h_inits=None, in_types=None):
 
     all_rows = []
     ts_bucket = {}  # (hidden_init, input_type) -> per-run timeseries dict
+
+    # Get per_run_row, losses, metrics, and gradients for each (hidden_init, input_type) setting
     for h in h_inits:
         for it in in_types:
+            print(f"Collecting for (hidden_init={h}, input_type={it})")
             rows, ts = collect_for_setting(h, it)
             if rows:
                 all_rows.extend(rows)
@@ -320,66 +400,40 @@ def collect_all(h_inits=None, in_types=None):
                 "best_loss",
                 "best_epoch",
                 "loss_auc",
-                "t_to_110pct_best",
+                "time_to_110pct_best",
             ]
         )
     )
 
-    # Aggregates over multiruns (per setting)
+    # Aggregate over multiruns (per setting)
     agg_rows = []
     if not per_run_df.empty:
+        # identify all per-run scalar columns to aggregate by (exlude ids)
+        exclude = {"hidden_init", "input_type", "run_kind", "run_id", "path"}
+        scalar_cols = [
+            c
+            for c in per_run_df.columns
+            if c not in exclude and pd.api.types.is_numeric_dtype(per_run_df[c])
+        ]
+
         for (h, it), group in per_run_df.groupby(["hidden_init", "input_type"]):
-            g_multi = group[group["run_kind"] == "multi"]
+            g_multi = group[group["run_kind"] == "multirun"]
+            row = {
+                "hidden_init": h,
+                "input_type": it,
+                "num_runs": int(g_multi.shape[0]),
+            }
             if g_multi.empty:
-                agg_rows.append(
-                    {
-                        "hidden_init": h,
-                        "input_type": it,
-                        "n_runs": 0,
-                        "final_loss_mean": np.nan,
-                        "final_loss_std": np.nan,
-                        "best_loss_mean": np.nan,
-                        "best_loss_std": np.nan,
-                        "best_epoch_mean": np.nan,
-                        "best_epoch_std": np.nan,
-                        "loss_auc_mean": np.nan,
-                        "loss_auc_std": np.nan,
-                        "t_to_110pct_best_mean": np.nan,
-                        "t_to_110pct_best_std": np.nan,
-                    }
-                )
+                for c in scalar_cols:
+                    row[f"{c}_mean"] = np.nan
+                    row[f"{c}_std"] = np.nan
             else:
-
-                def s(col):
-                    return (
-                        float(g_multi[col].mean()),
-                        float(g_multi[col].std(ddof=1))
-                        if g_multi.shape[0] > 1
-                        else 0.0,
+                for c in scalar_cols:
+                    row[f"{c}_mean"] = float(g_multi[c].mean())
+                    row[f"{c}_std"] = (
+                        float(g_multi[c].std(ddof=1)) if g_multi.shape[0] > 1 else 0.0
                     )
-
-                fl_m, fl_s = s("final_loss")
-                bl_m, bl_s = s("best_loss")
-                be_m, be_s = s("best_epoch")
-                auc_m, auc_s = s("loss_auc")
-                tt_m, tt_s = s("t_to_110pct_best")
-                agg_rows.append(
-                    {
-                        "hidden_init": h,
-                        "input_type": it,
-                        "n_runs": int(g_multi.shape[0]),
-                        "final_loss_mean": fl_m,
-                        "final_loss_std": fl_s,
-                        "best_loss_mean": bl_m,
-                        "best_loss_std": bl_s,
-                        "best_epoch_mean": be_m,
-                        "best_epoch_std": be_s,
-                        "loss_auc_mean": auc_m,
-                        "loss_auc_std": auc_s,
-                        "t_to_110pct_best_mean": tt_m,
-                        "t_to_110pct_best_std": tt_s,
-                    }
-                )
+            agg_rows.append(row)
     agg_df = pd.DataFrame(agg_rows)
     return per_run_df, agg_df, ts_bucket
 

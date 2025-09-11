@@ -155,7 +155,7 @@ def _pad_and_stack_losses(losses: List[List[float]]) -> np.ndarray:
     return arr
 
 
-def _to_list_opt(x: Union[str, Iterable, None]) -> Optional[List[str]]:
+def _to_list(x: Union[str, Iterable, None]) -> Optional[List[str]]:
     if x is None:
         return None
     if isinstance(x, str):
@@ -961,9 +961,9 @@ def plot_metric_trajectories(
     """
 
     ts_bucket = _load_ts_bucket(ts_bucket_path)
-    metrics = _to_list_opt(metrics)
-    filt_inputs = _to_list_opt(input_types)
-    filt_inits = _to_list_opt(hidden_inits)
+    metrics = _to_list(metrics)
+    filt_inputs = _to_list(input_types)
+    filt_inits = _to_list(hidden_inits)
     fs = _get_fontsizes(font_scale)
 
     # Collect available labels
@@ -1184,9 +1184,9 @@ def plot_gradient_dynamics(
     all_inputs = sorted({it for (h, it) in ts_bucket.keys()})
 
     use_inputs = [
-        it for it in (_to_list_opt(input_types) or all_inputs) if it in all_inputs
+        it for it in (_to_list(input_types) or all_inputs) if it in all_inputs
     ]
-    use_inits = [h for h in (_to_list_opt(hidden_inits) or all_inits) if h in all_inits]
+    use_inits = [h for h in (_to_list(hidden_inits) or all_inits) if h in all_inits]
 
     if facet_by not in ("input_type", "hidden_init"):
         raise ValueError("facet_by must be 'input_type' or 'hidden_init'.")
@@ -1663,9 +1663,9 @@ def plot_convergence_speed_curves(
     all_inputs = sorted({it for (h, it) in ts_bucket.keys()})
 
     use_inputs = [
-        it for it in (_to_list_opt(input_types) or all_inputs) if it in all_inputs
+        it for it in (_to_list(input_types) or all_inputs) if it in all_inputs
     ]
-    use_inits = [h for h in (_to_list_opt(hidden_inits) or all_inits) if h in all_inits]
+    use_inits = [h for h in (_to_list(hidden_inits) or all_inits) if h in all_inits]
     if len(use_inputs) == 0 or len(use_inits) == 0:
         raise ValueError("No matching input_types or hidden_inits found in ts_bucket.")
 
@@ -2608,3 +2608,1844 @@ def plot_parallel_coordinates(
 
     plt.tight_layout()
     plt.show()
+
+
+#########################################################################################################################################################################################       Weight Traces       ########################### ################################################################################
+################################################################################
+
+import torch
+import torch.nn as nn
+from RNN_Class import ElmanRNN_pytorch_module_v2 as Elman
+import math
+
+# -------------------
+# Project layout
+# -------------------
+try:
+    MODULE_DIR = Path(__file__).resolve().parent
+except NameError:
+    # e.g., running inside a notebook cell
+    MODULE_DIR = Path.cwd()
+DATA_DIR = MODULE_DIR / "data" / "Ns100_SeqN100"
+MODEL_ROOT = MODULE_DIR / "Elman_SGD" / "Remap_predloss" / "N100T100"
+MULTIRUNS_DIR = "multiruns"
+RUN_PREFIX = "run_"
+MODEL_FNAME = "Ns100_SeqN100_predloss_full.pth.tar"
+HIDDEN_WEIGHTS_SUBDIR = "hidden-weights"
+
+
+def _style_axes(ax, font_scale: float = 1.0):
+    ax.title.set_fontsize(14 * font_scale)
+    ax.xaxis.label.set_fontsize(12 * font_scale)
+    ax.yaxis.label.set_fontsize(12 * font_scale)
+    ax.tick_params(axis="both", which="major", labelsize=11 * font_scale)
+    ax.tick_params(axis="both", which="minor", labelsize=10 * font_scale)
+    # legend (if present)
+    leg = ax.get_legend()
+    if leg is not None:
+        for t in leg.get_texts():
+            t.set_fontsize(11 * font_scale)
+        if leg.get_title() is not None:
+            leg.get_title().set_fontsize(12 * font_scale)
+
+
+def _style_cbar(cbar, font_scale: float = 1.0):
+    if cbar is None:
+        return
+    cbar.ax.tick_params(labelsize=11 * font_scale)
+    label = cbar.ax.get_ylabel()
+    if label:
+        cbar.ax.set_ylabel(label, fontsize=12 * font_scale)
+
+
+# -------------------
+# I/O
+# -------------------
+def _load_dataset_Xmini(N=100, SeqN=100, data_dir: Path = DATA_DIR) -> torch.Tensor:
+    pkg = torch.load(data_dir / f"Ns{N}_SeqN{SeqN}_1.pth.tar", map_location="cpu")
+    return pkg["X_mini"][:, :-1, :]  # (1, SeqN-1, N)
+
+
+def _load_ckpt(path: Union[str, Path], map_location="cpu") -> Dict:
+    return torch.load(Path(path), map_location=map_location)
+
+
+def _find_hidden_W(state_dict: Dict[str, torch.Tensor]) -> np.ndarray:
+    if "hidden_linear.weight" in state_dict:
+        W = state_dict["hidden_linear.weight"]
+    elif "rnn.weight_hh_l0" in state_dict:
+        W = state_dict["rnn.weight_hh_l0"]
+    else:
+        raise KeyError("Hidden weight matrix not found in state_dict.")
+    return W.detach().cpu().numpy()
+
+
+# -------------------
+# Peak-time selection (argmax OR rolling-mean argmax)
+# -------------------
+def peak_time_from_argmax(hidden_seq: np.ndarray) -> np.ndarray:
+    """hidden_seq: (HN, T)"""
+    return np.argmax(hidden_seq, axis=1).astype(int)
+
+
+def peak_time_from_rolling_mean(hidden_seq: np.ndarray, window: int = 5) -> np.ndarray:
+    """hidden_seq: (HN, T). Centered moving average with 'same' conv."""
+    HN, T = hidden_seq.shape
+    kernel = np.ones(window, dtype=np.float32) / float(window)
+    peak_t = np.empty(HN, dtype=int)
+    for i in range(HN):
+        sm = np.convolve(hidden_seq[i], kernel, mode="same")
+        peak_t[i] = int(np.argmax(sm))
+    return peak_t
+
+
+def compute_peak_times(
+    hidden_seq: np.ndarray,
+    use_rolling: bool = False,
+    rolling_window: int = 5,
+) -> np.ndarray:
+    """Return per-neuron peak time indices according to the chosen method."""
+    if use_rolling:
+        # recommend odd window (5/7/9) for centered smoothing
+        return peak_time_from_rolling_mean(hidden_seq, window=rolling_window)
+    return peak_time_from_argmax(hidden_seq)
+
+
+# -------------------
+# Hidden sequence (forward pass over dataset)
+# -------------------
+def hidden_sequence_from_dataset(
+    state_dict: Dict[str, torch.Tensor],
+    N: int,
+    SeqN: int,
+    HN: int,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    data_dir: Path = DATA_DIR,
+) -> np.ndarray:
+    X_in = _load_dataset_Xmini(N=N, SeqN=SeqN, data_dir=data_dir).to(device)  # (1,T,N)
+    model = Elman(N, HN, N).to(device)
+    if activation is not None:
+        model.act = activation
+    model.load_state_dict(state_dict, strict=False)
+    model.eval()
+
+    T = X_in.shape[1]
+    h = torch.zeros(1, 1, HN, device=device)
+    hidden_seq = torch.empty(HN, T, device=device)
+
+    with torch.no_grad():
+        for t in range(T):
+            _, h = model(X_in[:, t : t + 1, :], h)
+            hidden_seq[:, t] = h.squeeze(0).squeeze(0)
+    return hidden_seq.detach().cpu().numpy()
+
+
+# -------------------
+# Single-run weight trace
+# -------------------
+def weight_trace_single_run(
+    model_path: Union[str, Path],
+    N: int = 100,
+    SeqN: int = 100,
+    HN: int = 100,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    use_rolling: bool = False,
+    rolling_window: int = 5,
+    wh_type: Optional[str] = None,
+    i_type: Optional[str] = None,
+    plot: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Returns: (offsets, trace_vals, sort_idx)
+    """
+    ckpt = _load_ckpt(model_path, map_location=device)
+    state_dict = ckpt["state_dict"]
+
+    W = _find_hidden_W(state_dict)  # (HN, HN)
+    hidden_seq = hidden_sequence_from_dataset(
+        state_dict, N=N, SeqN=SeqN, HN=HN, activation=activation, device=device
+    )
+
+    # peak times: argmax OR rolling-mean argmax
+    peak_t = compute_peak_times(
+        hidden_seq, use_rolling=use_rolling, rolling_window=rolling_window
+    )
+    sort_idx = np.argsort(peak_t)
+
+    W_sorted = W[sort_idx, :][:, sort_idx]
+    offsets = np.arange(-(HN - 1), HN)
+    trace_vals = np.array([np.trace(W_sorted, offset=k) for k in offsets])
+
+    if not plot:
+        return offsets, trace_vals, sort_idx
+
+    # plotting
+    c_max = float(np.abs(W_sorted).max()) if W_sorted.size else 1.0
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+    ax = axes[0]
+    im = ax.imshow(
+        W_sorted, cmap="RdBu_r", vmin=-1.001 * c_max, vmax=+1.001 * c_max, aspect="auto"
+    )
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_ticks([-c_max, 0.0, c_max])
+    cbar.ax.set_yticklabels([f"{-c_max:.3f}", "0.000", f"{c_max:.3f}"])
+    ax.set_xlabel("Presynaptic (sorted)")
+    ax.set_ylabel("Postsynaptic (sorted)")
+    title_tag = "rolling" if use_rolling else "argmax"
+    ax.set_title(
+        f"W sorted ({title_tag}) — {wh_type}, {i_type}"
+        if wh_type and i_type
+        else f"W sorted ({title_tag})"
+    )
+
+    ax = axes[1]
+    ax.plot(offsets, trace_vals, label="sum diag(W_sorted, k)")
+    ax.axhline(0.0, color="r", linestyle="--", linewidth=1)
+    ax.set_xlabel("Diagonal offset (k)")
+    ax.set_ylabel("Weight sum")
+    ax.set_title(f"Diagonal-offset trace ({title_tag})")
+    ax.legend()
+
+    plt.tight_layout()
+    plt.show()
+    return offsets, trace_vals, sort_idx
+
+
+# -------------------
+# Multi-run helpers
+# -------------------
+def _run_dir(hidden_init: str, input_type: str) -> Path:
+    return MODEL_ROOT / hidden_init / input_type / MULTIRUNS_DIR
+
+
+def _find_run_paths(hidden_init: str, input_type: str) -> List[Tuple[str, Path]]:
+    base = _run_dir(hidden_init, input_type)
+    if not base.exists():
+        return []
+    out = []
+    for d in sorted(base.glob(f"{RUN_PREFIX}*")):
+        p = d / MODEL_FNAME
+        if p.exists():
+            rid = d.name.replace(RUN_PREFIX, "", 1)
+            out.append((rid, p))
+    return out
+
+
+def compute_trace_for_run(
+    model_path: Union[str, Path],
+    N=100,
+    SeqN=100,
+    HN=100,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    use_rolling: bool = False,
+    rolling_window: int = 5,
+    plot=False,
+) -> Tuple[np.ndarray, np.ndarray]:
+    offsets, trace_vals, _ = weight_trace_single_run(
+        model_path,
+        N=N,
+        SeqN=SeqN,
+        HN=HN,
+        activation=activation,
+        device=device,
+        use_rolling=use_rolling,
+        rolling_window=rolling_window,
+        plot=plot,
+    )
+    return offsets, trace_vals
+
+
+def compute_traces_for_setting(
+    hidden_init: str,
+    input_type: str,
+    mode: str = "mean",  # {"single", "mean"}
+    run_id: Optional[str] = None,
+    N=100,
+    SeqN=100,
+    HN=100,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    use_rolling: bool = False,
+    rolling_window: int = 5,
+    show_individual: bool = False,
+):
+    paths = _find_run_paths(hidden_init, input_type)
+    if not paths:
+        return None
+
+    if mode == "single":
+        rid, p = (
+            next(((r, path) for r, path in paths if r == run_id), paths[0])
+            if run_id is not None
+            else paths[0]
+        )
+        offs, tr = compute_trace_for_run(
+            p,
+            N=N,
+            SeqN=SeqN,
+            HN=HN,
+            activation=activation,
+            device=device,
+            use_rolling=use_rolling,
+            rolling_window=rolling_window,
+        )
+        return {
+            "offsets": offs,
+            "trace_mean": tr,
+            "trace_std": None,
+            "per_run": [(rid, tr)] if show_individual else None,
+        }
+
+    per_run = []
+    offs_ref = None
+    for rid, p in paths:
+        offs, tr = compute_trace_for_run(
+            p,
+            N=N,
+            SeqN=SeqN,
+            HN=HN,
+            activation=activation,
+            device=device,
+            use_rolling=use_rolling,
+            rolling_window=rolling_window,
+        )
+        if offs_ref is None:
+            offs_ref = offs
+        per_run.append((rid, tr))
+
+    stack = np.vstack([tr for _, tr in per_run])
+    return {
+        "offsets": offs_ref,
+        "trace_mean": stack.mean(axis=0),
+        "trace_std": stack.std(axis=0, ddof=1)
+        if stack.shape[0] > 1
+        else np.zeros_like(stack[0]),
+        "per_run": per_run if show_individual else None,
+    }
+
+
+# -------------------
+# Faceted plotting
+# -------------------
+def plot_weight_traces(
+    hidden_inits: Union[str, List[str]],
+    input_types: Union[str, List[str]],
+    mode: str = "mean",
+    run_id: Optional[str] = None,
+    facet_by: str = "input_type",
+    ncols: Optional[int] = 2,
+    nrows: Optional[int] = None,
+    show_individual: bool = False,
+    N: int = 100,
+    SeqN: int = 100,
+    HN: int = 100,
+    activation: Optional[object] = None,  # or nn.Module
+    device: str = "cpu",
+    use_rolling: bool = False,
+    rolling_window: int = 5,
+    figsize_each: Tuple[int, int] = (8, 4),
+    alpha_runs: float = 0.18,
+    alpha_band: float = 0.25,
+    lw_mean: float = 2.0,
+    font_scale: float = 1.0,
+    # Legend controls (3.8-safe)
+    legend: bool = True,
+    legend_outside: bool = False,
+    legend_loc: str = "best",
+) -> None:
+    import math
+    from matplotlib.lines import Line2D
+
+    if isinstance(hidden_inits, str):
+        hidden_inits = [hidden_inits]
+    if isinstance(input_types, str):
+        input_types = [input_types]
+    assert facet_by in {"input_type", "hidden_init"}
+
+    overlay_dim = "hidden_init" if facet_by == "input_type" else "input_type"
+    facets = input_types if facet_by == "input_type" else hidden_inits
+    n = len(facets)
+
+    # grid
+    if ncols is None and nrows is None:
+        ncols = 2
+        nrows = math.ceil(n / ncols)
+    elif ncols is None:
+        ncols = math.ceil(n / nrows)
+    elif nrows is None:
+        nrows = math.ceil(n / ncols)
+    else:
+        if ncols * nrows < n:
+            nrows = math.ceil(n / ncols)
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(figsize_each[0] * ncols, figsize_each[1] * nrows),
+        squeeze=False,
+    )
+
+    method_tag = "rolling" if use_rolling else "argmax"
+
+    # if using a single legend for the whole figure, collect items here
+    global_legend: dict[str, Line2D] = {}
+
+    for idx, facet_val in enumerate(facets):
+        r, c = divmod(idx, ncols)
+        ax = axes[r][c]
+        overlays = hidden_inits if overlay_dim == "hidden_init" else input_types
+
+        # local legend items (if per-subplot legend)
+        local_legend: dict[str, Line2D] = {}
+
+        for ov in overlays:
+            h, i = (ov, facet_val) if overlay_dim == "hidden_init" else (facet_val, ov)
+            res = compute_traces_for_setting(
+                h,
+                i,
+                mode=mode,
+                run_id=run_id,
+                show_individual=show_individual,
+                N=N,
+                SeqN=SeqN,
+                HN=HN,
+                activation=activation,
+                device=device,
+                use_rolling=use_rolling,
+                rolling_window=rolling_window,
+            )
+            if res is None:
+                continue
+
+            offs, meanv, stdv = res["offsets"], res["trace_mean"], res["trace_std"]
+            # Keep labels simple: overlay name only
+            label = f"{h}" if facet_by == "input_type" else f"{i}"
+            # draw mean line
+            (line,) = ax.plot(offs, meanv, lw=lw_mean, label=label)
+            # keep a single handle per label
+            local_legend.setdefault(label, line)
+            global_legend.setdefault(label, line)
+
+            if mode == "mean" and stdv is not None:
+                ax.fill_between(
+                    offs, meanv - stdv, meanv + stdv, alpha=alpha_band, linewidth=0
+                )
+                if show_individual and res["per_run"]:
+                    for _, tr in res["per_run"]:
+                        ax.plot(offs, tr, alpha=alpha_runs, linewidth=1)
+
+        ax.axhline(0.0, color="r", linestyle="--", linewidth=1)
+        ax.set_xlabel("Diagonal offset (k)")
+        ax.set_ylabel("Weight sum")
+        ax.set_title(
+            (f"input_type = {facet_val}")
+            if facet_by == "input_type"
+            else (f"hidden_init = {facet_val}")
+        )
+        _style_axes(ax, font_scale=font_scale)
+
+        if legend and not legend_outside:
+            if local_legend:
+                ax.legend(
+                    list(local_legend.values()),
+                    list(local_legend.keys()),
+                    loc=legend_loc,
+                    fontsize=11 * font_scale,
+                )
+
+    # hide empties
+    total = nrows * ncols
+    for j in range(n, total):
+        r, c = divmod(j, ncols)
+        axes[r][c].axis("off")
+
+    # single global legend
+    if legend and legend_outside and global_legend:
+        fig.legend(
+            list(global_legend.values()),
+            list(global_legend.keys()),
+            loc="center right",
+            bbox_to_anchor=(1.02, 0.5),
+            fontsize=11 * font_scale,
+            frameon=False,
+        )
+        fig.subplots_adjust(right=0.85)
+
+    fig.tight_layout()
+    plt.show()
+
+
+def compute_sorted_W_for_run(
+    model_path: Union[str, Path],
+    N: int = 100,
+    SeqN: int = 100,
+    HN: int = 100,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    use_rolling: bool = False,
+    rolling_window: int = 5,
+    data_dir: Optional[Union[str, Path]] = DATA_DIR,
+) -> np.ndarray:
+    """
+    Returns W_sorted (HN, HN) for a single run.
+    """
+    ckpt = _load_ckpt(model_path, map_location=device)
+    state_dict = ckpt["state_dict"]
+
+    W = _find_hidden_W(state_dict)  # (HN, HN)
+    hidden_seq = hidden_sequence_from_dataset(
+        state_dict,
+        N=N,
+        SeqN=SeqN,
+        HN=HN,
+        activation=activation,
+        device=device,
+        data_dir=data_dir,
+    )
+    peak_t = compute_peak_times(
+        hidden_seq, use_rolling=use_rolling, rolling_window=rolling_window
+    )
+    sort_idx = np.argsort(peak_t)
+    W_sorted = W[sort_idx, :][:, sort_idx]
+    return W_sorted
+
+
+def collect_sorted_Ws_for_setting(
+    hidden_init: str,
+    input_type: str,
+    N: int = 100,
+    SeqN: int = 100,
+    HN: int = 100,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    use_rolling: bool = False,
+    rolling_window: int = 5,
+    data_dir: Optional[Union[str, Path]] = DATA_DIR,
+) -> List[np.ndarray]:
+    """
+    Returns a list of W_sorted (each HN x HN), one per run found.
+    """
+    W_list = []
+    for rid, p in _find_run_paths(hidden_init, input_type):
+        try:
+            W_sorted = compute_sorted_W_for_run(
+                p,
+                N=N,
+                SeqN=SeqN,
+                HN=HN,
+                activation=activation,
+                device=device,
+                use_rolling=use_rolling,
+                rolling_window=rolling_window,
+                data_dir=data_dir,
+            )
+            W_list.append(W_sorted)
+        except Exception as e:
+            print(f"[WARN] Skipping {hidden_init}/{input_type} run {rid}: {e}")
+    return W_list
+
+
+def aggregate_sorted_Ws(W_list: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Elementwise mean and std across runs (stack W_sorted along axis=0).
+    """
+    if not W_list:
+        raise ValueError("No W_sorted matrices provided.")
+    stack = np.stack(W_list, axis=0)  # [n_runs, HN, HN]
+    mean_W = stack.mean(axis=0)
+    std_W = stack.std(axis=0, ddof=1) if stack.shape[0] > 1 else np.zeros_like(stack[0])
+    return mean_W, std_W
+
+
+def _compute_facet_grid(
+    n: int, ncols: Optional[int], nrows: Optional[int]
+) -> Tuple[int, int]:
+    import math
+
+    if ncols is None and nrows is None:
+        ncols = 2
+        nrows = math.ceil(n / ncols)
+    elif ncols is None:
+        ncols = math.ceil(n / nrows)
+    elif nrows is None:
+        nrows = math.ceil(n / ncols)
+    else:
+        if ncols * nrows < n:
+            nrows = math.ceil(n / ncols)
+    return nrows, ncols
+
+
+def plot_sorted_W_aggregates(
+    hidden_inits: Union[str, List[str]],
+    input_types: Union[str, List[str]],
+    facet_by: str = "input_type",  # {"input_type","hidden_init"}
+    show: str = "both",  # {"mean","std","both"}
+    N: int = 100,
+    SeqN: int = 100,
+    HN: int = 100,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    use_rolling: bool = False,
+    rolling_window: int = 5,
+    data_dir: Optional[Union[str, Path]] = None,
+    ncols: Optional[int] = 2,
+    nrows: Optional[int] = None,
+    figsize_each: Tuple[int, int] = (4, 4),
+    cmap_mean: str = "RdBu_r",
+    cmap_std: str = "viridis",
+    font_scale: float = 1.0,
+):
+    if isinstance(hidden_inits, str):
+        hidden_inits = [hidden_inits]
+    if isinstance(input_types, str):
+        input_types = [input_types]
+    assert facet_by in {"input_type", "hidden_init"}
+    assert show in {"mean", "std", "both"}
+
+    facets = input_types if facet_by == "input_type" else hidden_inits
+
+    # gather facet aggregates
+    agg = {}  # facet -> (mean_W, std_W)
+    for facet_val in facets:
+        W_all = []
+        if facet_by == "input_type":
+            for hinit in hidden_inits:
+                W_list = collect_sorted_Ws_for_setting(
+                    hinit,
+                    facet_val,
+                    N=N,
+                    SeqN=SeqN,
+                    HN=HN,
+                    activation=activation,
+                    device=device,
+                    use_rolling=use_rolling,
+                    rolling_window=rolling_window,
+                    data_dir=DATA_DIR,
+                )
+                if W_list:
+                    mean_W, _ = aggregate_sorted_Ws(W_list)
+                    W_all.append(mean_W)
+        else:
+            for it in input_types:
+                W_list = collect_sorted_Ws_for_setting(
+                    facet_val,
+                    it,
+                    N=N,
+                    SeqN=SeqN,
+                    HN=HN,
+                    activation=activation,
+                    device=device,
+                    use_rolling=use_rolling,
+                    rolling_window=rolling_window,
+                    data_dir=DATA_DIR,
+                )
+                if W_list:
+                    mean_W, _ = aggregate_sorted_Ws(W_list)
+                    W_all.append(mean_W)
+
+        if not W_all:
+            print(f"[WARN] no runs found for facet={facet_val}; skipping.")
+            continue
+
+        stack = np.stack(W_all, axis=0)
+        mean_of_means = stack.mean(axis=0)
+        std_of_means = (
+            stack.std(axis=0, ddof=1)
+            if stack.shape[0] > 1
+            else np.zeros_like(mean_of_means)
+        )
+        agg[facet_val] = (mean_of_means, std_of_means)
+
+    if not agg:
+        print("[INFO] Nothing to plot.")
+        return
+
+    means = [m for (m, s) in agg.values()]
+    stds = [s for (m, s) in agg.values()]
+    max_abs_mean = max(float(np.abs(m).max()) for m in means)
+    max_std = max(float(s.max()) for s in stds)
+
+    # grid dims
+    import math
+
+    n = len(agg)
+    if ncols is None and nrows is None:
+        ncols = 2
+        nrows = math.ceil(n / ncols)
+    elif ncols is None:
+        ncols = math.ceil(n / nrows)
+    elif nrows is None:
+        nrows = math.ceil(n / ncols)
+    else:
+        if ncols * nrows < n:
+            nrows = math.ceil(n / ncols)
+
+    # MEAN figure
+    if show in {"mean", "both"}:
+        fig_m, axes_m = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(figsize_each[0] * ncols, figsize_each[1] * nrows),
+            squeeze=False,
+        )
+        vmin_m, vmax_m = -max_abs_mean, +max_abs_mean
+        for idx, facet_val in enumerate(facets):
+            if facet_val not in agg:
+                continue
+            r, c = divmod(idx, ncols)
+            ax = axes_m[r][c]
+            mean_W, _ = agg[facet_val]
+            im = ax.imshow(
+                mean_W, cmap=cmap_mean, vmin=vmin_m, vmax=vmax_m, aspect="auto"
+            )
+            ax.set_title(f"{facet_by} = {facet_val} — mean")
+            ax.set_xlabel("Presynaptic (sorted)")
+            ax.set_ylabel("Postsynaptic (sorted)")
+            _style_axes(ax, font_scale=font_scale)  # <--- apply scaling
+            if c == ncols - 1:
+                cbar = fig_m.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                _style_cbar(cbar, font_scale=font_scale)  # <--- apply scaling
+        # hide empties
+        total = nrows * ncols
+        for j in range(n, total):
+            r, c = divmod(j, ncols)
+            axes_m[r][c].axis("off")
+        fig_m.tight_layout()
+        plt.show()
+
+    # STD figure
+    if show in {"std", "both"}:
+        fig_s, axes_s = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(figsize_each[0] * ncols, figsize_each[1] * nrows),
+            squeeze=False,
+        )
+        vmin_s, vmax_s = 0.0, max_std if max_std > 0 else 1e-12
+        for idx, facet_val in enumerate(facets):
+            if facet_val not in agg:
+                continue
+            r, c = divmod(idx, ncols)
+            ax = axes_s[r][c]
+            _, std_W = agg[facet_val]
+            im = ax.imshow(
+                std_W, cmap=cmap_std, vmin=vmin_s, vmax=vmax_s, aspect="auto"
+            )
+            ax.set_title(f"{facet_by} = {facet_val} — std")
+            ax.set_xlabel("Presynaptic (sorted)")
+            ax.set_ylabel("Postsynaptic (sorted)")
+            _style_axes(ax, font_scale=font_scale)  # <--- apply scaling
+            if c == ncols - 1:
+                cbar = fig_s.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                _style_cbar(cbar, font_scale=font_scale)  # <--- apply scaling
+        total = nrows * ncols
+        for j in range(n, total):
+            r, c = divmod(j, ncols)
+            axes_s[r][c].axis("off")
+        fig_s.tight_layout()
+        plt.show()
+
+
+######### Eigenspectrum
+def _list_hidden_weight_files(run_dir_or_file: Path) -> List[Path]:
+    """
+    Accept either a run directory or a file within it; return sorted hidden-weight files.
+    """
+    run_root = run_dir_or_file
+    if run_root.is_file():
+        run_root = run_root.parent  # e.g., was ".../run_03/Ns...pth.tar"
+    hw_dir = run_root / HIDDEN_WEIGHTS_SUBDIR
+    if not hw_dir.exists():
+        return []
+    # be liberal in file patterns: handle .pt, .pth, .pth.tar, etc.
+    files = [p for p in hw_dir.iterdir() if p.is_file()]
+    files.sort()  # assumes names encode epoch order
+    return files
+
+
+def _load_hidden_W_from_ckpt(ckpt_path: Path) -> torch.Tensor:
+    pkg = torch.load(ckpt_path, map_location="cpu")
+    sd = pkg.get("state_dict", pkg)
+    # common keys for your codebase
+    for k in ("rnn.weight_hh_l0", "hidden_linear.weight"):
+        if k in sd and torch.is_tensor(sd[k]):
+            W = sd[k]
+            break
+    else:
+        # try suffix match to be safer across variants
+        k = next(
+            (
+                k
+                for k in sd.keys()
+                if k.endswith("rnn.weight_hh_l0") or k.endswith("hidden_linear.weight")
+            ),
+            None,
+        )
+        if k is None:
+            raise KeyError(
+                "No hidden weight key found in checkpoint: %s" % list(sd.keys())[:10]
+            )
+        W = sd[k]
+    if W.dim() != 2:
+        W = W.view(W.shape[0], -1)
+    return W
+
+
+def _pick_snapshot(paths: List[Path], snapshot: str) -> Optional[Path]:
+    if not paths:
+        return None
+    snapshot = snapshot.lower()
+    if snapshot == "first":
+        return paths[0]
+    if snapshot == "middle":
+        return paths[len(paths) // 2]
+    # default
+    return paths[-1]
+
+
+def _load_weight_tensor(p: Path) -> torch.Tensor:
+    obj = torch.load(p, map_location="cpu")
+    if torch.is_tensor(obj):
+        W = obj
+    elif isinstance(obj, dict):
+        # try common keys
+        for k in ("weight", "hidden_linear.weight", "rnn.weight_hh_l0"):
+            if k in obj and torch.is_tensor(obj[k]):
+                W = obj[k]
+                break
+        else:
+            # if it's a plain state_dict
+            for k in obj.keys():
+                if k.endswith("hidden_linear.weight") or k.endswith("rnn.weight_hh_l0"):
+                    W = obj[k]
+                    break
+            else:
+                raise ValueError(
+                    f"Unrecognized dict payload in {p.name}: keys={list(obj.keys())[:5]}"
+                )
+    else:
+        raise ValueError(f"Unsupported weight file type at {p}")
+    # ensure 2D
+    if W.dim() != 2:
+        W = W.view(W.shape[0], -1)
+    return W
+
+
+def eigvals_compat(W: torch.Tensor) -> np.ndarray:
+    try:
+        ev = torch.linalg.eigvals(W)
+        return ev.detach().cpu().numpy()
+    except Exception:
+        reim, _ = torch.eig(W, eigenvectors=False)
+        return reim[:, 0].numpy() + 1j * reim[:, 1].numpy()
+
+
+def _find_run_entries(
+    hidden_init: str, input_type: str
+) -> List[Tuple[str, Path, Path]]:
+    """
+    Returns a list of (run_id, run_dir, ckpt_path) for runs that have the checkpoint.
+    """
+    base = MODEL_ROOT / hidden_init / input_type / MULTIRUNS_DIR
+    if not base.exists():
+        return []
+    out = []
+    for d in sorted(base.glob(f"{RUN_PREFIX}*")):
+        ckpt = d / MODEL_FNAME
+        if ckpt.exists():
+            rid = d.name.replace(RUN_PREFIX, "", 1)
+            out.append((rid, d, ckpt))
+    return out
+
+
+def plot_eigs_single_run(
+    hidden_init: str,
+    input_type: str,
+    run_id: str = None,  # e.g., "03"
+    snapshot: str = "last",  # {"first","middle","last"}
+    font_scale: float = 1.0,
+) -> None:
+    runs = _find_run_entries(hidden_init, input_type)
+    if not runs:
+        print("[WARN] No runs for %s/%s" % (hidden_init, input_type))
+        return
+
+    if run_id is None:
+        rid, run_dir, ckpt = runs[0]
+    else:
+        match = [x for x in runs if x[0] == run_id]
+        rid, run_dir, ckpt = match[0] if match else runs[0]
+
+    files = _list_hidden_weight_files(run_dir)
+    if files:
+        p = _pick_snapshot(files, snapshot)
+        W = _load_weight_tensor(p)
+        subtitle = "%s" % p.name
+    else:
+        # fallback to the checkpoint's hidden W
+        W = _load_hidden_W_from_ckpt(ckpt)
+        subtitle = "%s (ckpt)" % ckpt.name
+
+    W = _load_weight_tensor(p)
+    # Heatmap
+    vmax = float(torch.max(torch.abs(W)))
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4))
+    im = axes[0].imshow(W, origin="upper", aspect="auto", vmin=-vmax, vmax=vmax)
+    axes[0].set_title(f"W ({hidden_init}, {input_type}, run {rid}, {snapshot})")
+    axes[0].set_xlabel("pre")
+    axes[0].set_ylabel("post")
+    _style_axes(axes[0], font_scale=font_scale)
+    cbar = fig.colorbar(im, ax=axes[0], fraction=0.046, pad=0.04)
+
+    # Eigs
+    ev = eigvals_compat(W)
+    r = float(np.max(np.abs(ev))) if ev.size else 0.0
+    axes[1].scatter(ev.real, ev.imag, s=8)
+    circ = plt.Circle((0, 0), r, fill=False, ls="--")
+    axes[1].add_artist(circ)
+    axes[1].axhline(0, lw=0.5, c="k")
+    axes[1].axvline(0, lw=0.5, c="k")
+    axes[1].set_aspect("equal", "box")
+    axes[1].set_title(f"Eigvals (radius≈{r:.3f})")
+    axes[1].set_xlabel("Re(λ)")
+    axes[1].set_ylabel("Im(λ)")
+    _style_axes(axes[1], font_scale=font_scale)
+
+    fig.tight_layout()
+    plt.show()
+
+
+def _radial_hist(
+    ev: np.ndarray, rmax: Optional[float], nbins: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    radii = np.abs(ev)
+    if rmax is None:
+        rmax = float(radii.max()) if radii.size else 1.0
+    edges = np.linspace(0.0, rmax, nbins + 1)
+    hist, _ = np.histogram(radii, bins=edges, density=True)
+    centers = 0.5 * (edges[1:] + edges[:-1])
+    return centers, hist
+
+
+def _collect_eigs_for_setting(
+    hidden_init: str, input_type: str, snapshot: str
+) -> List[np.ndarray]:
+    out = []
+    for rid, run_dir, ckpt in _find_run_entries(hidden_init, input_type):
+        files = _list_hidden_weight_files(run_dir)
+        try:
+            if files:
+                p = _pick_snapshot(files, snapshot)
+                W = _load_weight_tensor(p)
+            else:
+                W = _load_hidden_W_from_ckpt(ckpt)  # fallback
+            ev = eigvals_compat(W)
+            out.append(ev)
+        except Exception as e:
+            print(
+                "[WARN] Skipping %s/%s run %s at %s: %s: %s"
+                % (
+                    hidden_init,
+                    input_type,
+                    rid,
+                    (files[-1] if files else ckpt),
+                    type(e).__name__,
+                    e,
+                )
+            )
+    return out
+
+
+def plot_eigs_aggregates(
+    hidden_inits: Union[str, List[str]],
+    input_types: Union[str, List[str]],
+    facet_by: str = "input_type",  # {"input_type","hidden_init"}
+    snapshot: str = "last",  # {"first","middle","last"}
+    nbins: int = 40,
+    ncols: Optional[int] = 2,
+    nrows: Optional[int] = None,
+    figsize_each: Tuple[int, int] = (6, 4),
+    font_scale: float = 1.0,
+    show_radius: bool = True,
+) -> None:
+    """
+    Each facet = one (hidden_init, input_type) setting (fixed snapshot).
+    Within each facet: mean ± std (across runs) of the radial eigendensity p(|λ|).
+    """
+    # Build the cartesian list of settings as facets (one panel per setting)
+    pairs = []
+    labels = []
+    H = hidden_inits if isinstance(hidden_inits, list) else [hidden_inits]
+    I = input_types if isinstance(input_types, list) else [input_types]
+    if facet_by == "hidden_init" and len(I) == 1:
+        for h in H:
+            pairs.append((h, I[0]))
+            labels.append(h)
+    elif facet_by == "input_type" and len(H) == 1:
+        for it in I:
+            pairs.append((H[0], it))
+            labels.append(it)
+    else:
+        # cartesian when multiple of both (label both dims)
+        for h in H:
+            for it in I:
+                pairs.append((h, it))
+                labels.append(f"{h} | {it}")
+
+    # Collect eigs and spectral radii per setting
+    per_setting = []  # (label, centers, mean_hist, std_hist, mean_radius)
+    # common rmax across runs in a setting so hist bins align; choose per-setting rmax as max radius across its runs
+    for (h, it), lab in zip(pairs, labels):
+        all_eigs = _collect_eigs_for_setting(h, it, snapshot=snapshot)
+        if not all_eigs:
+            print(f"[WARN] No eigs for {h}/{it}; skipping.")
+            continue
+        # choose rmax
+        rmax = max(float(np.max(np.abs(ev))) for ev in all_eigs if ev.size)
+        # build per-run histograms with same edges
+        Hs = []
+        for ev in all_eigs:
+            centers, hist = _radial_hist(ev, rmax=rmax, nbins=nbins)
+            Hs.append(hist)
+        Hs = np.stack(Hs, axis=0)  # [runs, nbins]
+        mean_h = Hs.mean(axis=0)
+        std_h = Hs.std(axis=0, ddof=1) if Hs.shape[0] > 1 else np.zeros_like(mean_h)
+        mean_r = np.mean([float(np.max(np.abs(ev))) for ev in all_eigs])
+        per_setting.append((lab, centers, mean_h, std_h, mean_r, (h, it)))
+
+    if not per_setting:
+        print("[INFO] Nothing to plot.")
+        return
+
+    # Layout
+    n = len(per_setting)
+    nrows_eff, ncols_eff = _compute_grid(n, ncols, nrows)
+    fig, axes = plt.subplots(
+        nrows_eff,
+        ncols_eff,
+        figsize=(figsize_each[0] * ncols_eff, figsize_each[1] * nrows_eff),
+        squeeze=False,
+    )
+
+    # Plot each facet
+    for idx, (lab, centers, mean_h, std_h, mean_r, (h, it)) in enumerate(per_setting):
+        r, c = divmod(idx, ncols_eff)
+        ax = axes[r][c]
+        ax.plot(centers, mean_h, lw=2.0, label="mean density")
+        ax.fill_between(
+            centers,
+            mean_h - std_h,
+            mean_h + std_h,
+            alpha=0.25,
+            linewidth=0,
+            label="±1 SD",
+        )
+        if show_radius:
+            ax.axvline(
+                mean_r, color="r", ls="--", lw=1.0, label=f"mean radius={mean_r:.3f}"
+            )
+        ax.set_xlabel("|λ|")
+        ax.set_ylabel("density")
+        ax.set_title(f"{lab}  [{h}, {it}, {snapshot}]")
+        _style_axes(ax, font_scale=font_scale)
+        ax.legend(fontsize=10 * font_scale)
+
+    # Hide empties
+    total = nrows_eff * ncols_eff
+    for j in range(n, total):
+        r, c = divmod(j, ncols_eff)
+        axes[r][c].axis("off")
+
+    fig.tight_layout()
+    plt.show()
+
+
+#########################################################################################################################################################################################       Replay      ################################### ################################################################################
+################################################################################
+# -------------------
+# I/O
+# -------------------
+_INPUT_SUFFIX = {
+    "gaussian": "1",
+    "small-gaussian": "5gauss",
+    "onehot": "1hot",
+    "khot": "5hot",
+}
+
+
+def _as_path(p: Optional[Union[str, Path]]) -> Optional[Path]:
+    if p is None:
+        return None
+    return p if isinstance(p, Path) else Path(p)
+
+
+def _dataset_filename(N: int, SeqN: int, input_type: str) -> str:
+    key = input_type.lower()
+    if key not in _INPUT_SUFFIX:
+        raise ValueError(
+            "Unknown input_type %r. Expected one of: %s"
+            % (input_type, ", ".join(_INPUT_SUFFIX.keys()))
+        )
+    suf = _INPUT_SUFFIX[key]
+    return "Ns%d_SeqN%d_%s.pth.tar" % (N, SeqN, suf)
+
+
+def _load_dataset_X_and_Y(
+    N: int = 100,
+    SeqN: int = 100,
+    input_type: str = "gaussian",
+    data_dir: Optional[Union[str, Path]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Loads the dataset that matches `input_type` and returns:
+      X_in:  (1, T, N) where T = SeqN-1
+      Y_true:(1, T, N) = Target[:, 1:, :]
+    """
+    base = _as_path(data_dir) or DATA_DIR
+    fname = base / _dataset_filename(N, SeqN, input_type)
+    if not fname.exists():
+        raise FileNotFoundError(
+            "Dataset not found at %s (module_dir=%s)" % (str(fname), str(MODULE_DIR))
+        )
+    pkg = torch.load(fname, map_location="cpu")
+    X_mini = pkg["X_mini"]  # (1, SeqN, N)
+    Target = pkg["Target_mini"]  # (1, SeqN, N)
+    X_in = X_mini[:, :-1, :]  # (1, T, N)
+    Y_true = Target[:, 1:, :]  # (1, T, N)
+    return X_in, Y_true
+
+
+def _facet_pairs(hidden_inits, input_types, facet_by):
+    """
+    Returns a list of (h, i) settings to plot, and the facet order.
+    Each facet corresponds to exactly one (hidden_init, input_type) setting.
+    """
+    H = _to_list(hidden_inits)
+    I = _to_list(input_types)
+    assert facet_by in {"hidden_init", "input_type"}
+
+    pairs = []
+    facet_labels = []
+
+    if facet_by == "hidden_init":
+        # Prefer: multiple hidden_inits, single input_type
+        if len(I) == 1:
+            for h in H:
+                pairs.append((h, I[0]))
+                facet_labels.append(h)
+        else:
+            # Cartesian (warn informally); each panel is one (h,i)
+            for h, it in product(H, I):
+                pairs.append((h, it))
+                facet_labels.append("%s | %s" % (h, it))
+    else:  # facet_by == "input_type"
+        if len(H) == 1:
+            for it in I:
+                pairs.append((H[0], it))
+                facet_labels.append(it)
+        else:
+            for h, it in product(H, I):
+                pairs.append((h, it))
+                facet_labels.append("%s | %s" % (it, h))
+
+    return pairs, facet_labels
+
+
+# -------------------
+# Core replay primitives
+# -------------------
+def make_noise_like(
+    X_in: torch.Tensor,
+    scale: float = 0.01,
+    seed: Optional[int] = 0,
+) -> torch.Tensor:
+    """
+    X_in: (1, T, N) tensor; noise std = scale * max(|X_in|)
+    """
+    rng = np.random.default_rng(seed)
+    T, N = X_in.shape[1], X_in.shape[2]
+    sigma = float(torch.as_tensor(X_in).abs().max().item()) * scale
+    Z = rng.normal(0.0, sigma, size=(1, T, N)).astype(np.float32)
+    return torch.from_numpy(Z)
+
+
+def forward_sequence(
+    state_dict: Dict[str, torch.Tensor],
+    X: torch.Tensor,  # (1, T, N)
+    N: int,
+    HN: int,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+) -> torch.Tensor:
+    """
+    Run Elman over sequence X (no grad). Returns outputs (1, T, N).
+    """
+    model = Elman(N, HN, N).to(device)
+    if activation is not None:
+        model.act = activation
+    model.load_state_dict(state_dict, strict=False)
+    model.eval()
+
+    X = X.to(device)
+    T = X.shape[1]
+    h = torch.zeros(1, 1, HN, device=device)
+    outs = torch.empty(1, T, N, device=device)
+    with torch.no_grad():
+        for t in range(T):
+            o, h = model(X[:, t : t + 1, :], h)
+            outs[:, t, :] = o
+    return outs.detach().cpu()
+
+
+# -------------------
+# Single-run replay (optionally plot)
+# -------------------
+def replay_single_run(
+    model_path: Union[str, Path],
+    N: int = 100,
+    SeqN: int = 100,
+    HN: int = 100,
+    input_type: str = "gaussian",
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    *,
+    data_dir: Optional[Union[str, Path]] = DATA_DIR,
+    noise_scale: float = 0.01,
+    noise_seed: Optional[int] = 0,
+    plot: bool = True,
+    font_scale: float = 1.0,
+    title_tag: Optional[str] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Returns:
+      X_noise: (N, T), Y_true: (N, T), Y_out: (N, T) as numpy arrays.
+    """
+    X_in, Y_true = _load_dataset_X_and_Y(
+        N=N, SeqN=SeqN, input_type=input_type, data_dir=data_dir
+    )
+    X_noise = make_noise_like(X_in, scale=noise_scale, seed=noise_seed)
+
+    ckpt = _load_ckpt(model_path, map_location=device)
+    state_dict = ckpt["state_dict"]
+    Y_out = forward_sequence(
+        state_dict, X_noise, N=N, HN=HN, activation=activation, device=device
+    )
+
+    # (1,T,N) -> (N,T) for plotting (neurons x time)
+    Xn = X_noise[0].T.numpy()
+    Yt = Y_true[0].T.numpy()
+    Yo = Y_out[0].T.numpy()
+
+    if plot:
+        data = [Xn, Yt, Yo]
+        titles = [
+            "Input noise ($x_t$)",
+            "Target ($y_t$: %s)" % input_type,
+            "Output on noise ($\\hat{y}_t$)",
+        ]
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4.5))
+        vmaxs = [np.abs(d).max() for d in data]
+        for i, ax in enumerate(axes):
+            im = ax.imshow(data[i], aspect="auto")
+            ax.set_title(titles[i])
+            ax.set_xlabel("time t")
+            ax.set_ylabel("neurons")
+            _style_axes(ax, font_scale=font_scale)
+            cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            _style_cbar(cbar, font_scale=font_scale)
+        supt = title_tag if title_tag else "Replay"
+        fig.suptitle(supt, fontsize=16 * font_scale)
+        fig.tight_layout()
+        plt.show()
+
+    return Xn, Yt, Yo
+
+
+# -------------------
+# Multirun aggregation: mean/std of replay OUTPUT on the same noise
+# -------------------
+def compute_replay_for_run(
+    model_path: Union[str, Path],
+    X_noise: torch.Tensor,  # (1, T, N)
+    N=100,
+    HN=100,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+) -> np.ndarray:
+    ckpt = _load_ckpt(model_path, map_location=device)
+    state_dict = ckpt["state_dict"]
+    Y_out = forward_sequence(
+        state_dict, X_noise, N=N, HN=HN, activation=activation, device=device
+    )  # (1,T,N)
+    return Y_out[0].T.numpy()  # (N,T)
+
+
+def collect_replay_outputs_for_setting(
+    hidden_init: str,
+    input_type: str,
+    N: int = 100,
+    SeqN: int = 100,
+    HN: int = 100,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    data_dir: Optional[Union[str, Path]] = DATA_DIR,
+    noise_scale: float = 0.01,
+    noise_seed: Optional[int] = 0,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Returns:
+      Xn: (N,T), Yt: (N,T), list_of_Yo: List[(run_id, (N,T))]
+    All runs use the SAME noise for comparability.
+    """
+    # Prepare deterministic noise & target
+    X_in, Y_true = _load_dataset_X_and_Y(
+        N=N, SeqN=SeqN, input_type=input_type, data_dir=data_dir
+    )
+    X_noise = make_noise_like(X_in, scale=noise_scale, seed=noise_seed)
+
+    paths = _find_run_paths(hidden_init, input_type)
+    outs = []
+    for rid, p in paths:
+        try:
+            Yo = compute_replay_for_run(
+                p, X_noise, N=N, HN=HN, activation=activation, device=device
+            )
+            outs.append((rid, Yo))
+        except Exception as e:
+            print(f"[WARN] Skipping {hidden_init}/{input_type} run {rid}: {e}")
+    if not outs:
+        return X_noise[0].T.numpy(), Y_true[0].T.numpy(), []
+
+    return X_noise[0].T.numpy(), Y_true[0].T.numpy(), outs
+
+
+def aggregate_replay_outputs(outs: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    outs: list of (N,T) arrays
+    Returns: (mean_out, std_out) both (N,T)
+    """
+    stack = np.stack(outs, axis=0)  # [n_runs, N, T]
+    mean_o = stack.mean(axis=0)
+    std_o = stack.std(axis=0, ddof=1) if stack.shape[0] > 1 else np.zeros_like(stack[0])
+    return mean_o, std_o
+
+
+# -------------------
+# Faceted plotting of aggregated replay outputs (mean/std)
+# -------------------
+def _compute_grid(
+    n: int, ncols: Optional[int], nrows: Optional[int]
+) -> Tuple[int, int]:
+    if ncols is None and nrows is None:
+        ncols, nrows = 2, math.ceil(n / 2)
+    elif ncols is None:
+        ncols = math.ceil(n / nrows)
+    elif nrows is None:
+        nrows = math.ceil(n / ncols)
+    else:
+        if ncols * nrows < n:
+            nrows = math.ceil(n / ncols)
+    return nrows, ncols
+
+
+def plot_replay_aggregates(
+    hidden_inits: Union[str, List[str]],
+    input_types: Union[str, List[str]],
+    facet_by: str = "input_type",  # {"input_type","hidden_init"}
+    show: str = "both",  # {"mean","std","both"}
+    N: int = 100,
+    SeqN: int = 100,
+    HN: int = 100,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    data_dir: Optional[Union[str, Path]] = None,
+    noise_scale: float = 0.01,
+    noise_seed: Optional[int] = 0,
+    ncols: Optional[int] = 2,
+    nrows: Optional[int] = None,
+    figsize_each: Tuple[int, int] = (5, 4),
+    cmap_mean: str = "viridis",
+    cmap_std: str = "magma",
+    font_scale: float = 1.0,
+) -> None:
+    """
+    Each facet = one (hidden_init, input_type) **setting**.
+    Inside each facet: aggregate **across runs only** (mean/std) for that setting.
+    No averaging across different hidden_inits or input_types.
+    """
+    # Build (h,i) settings per facet
+    pairs, facet_labels = _facet_pairs(hidden_inits, input_types, facet_by)
+
+    # Collect stats per setting
+    setting_stats = {}  # (h,i) -> (mean_out (N,T), std_out (N,T))
+    for (h, it), label in zip(pairs, facet_labels):
+        Xn, Yt, outs = collect_replay_outputs_for_setting(
+            h,
+            it,
+            N=N,
+            SeqN=SeqN,
+            HN=HN,
+            activation=activation,
+            device=device,
+            data_dir=data_dir,
+            noise_scale=noise_scale,
+            noise_seed=noise_seed,
+        )
+        if not outs:
+            print("[WARN] No runs for setting %s/%s; skipping." % (h, it))
+            continue
+        mean_o, std_o = aggregate_replay_outputs([o for _, o in outs])
+        setting_stats[(h, it)] = (mean_o, std_o)
+
+    if not setting_stats:
+        print("[INFO] Nothing to plot.")
+        return
+
+    # Global color scales across panels
+    means = [m for (m, s) in setting_stats.values()]
+    stds = [s for (m, s) in setting_stats.values()]
+    max_abs_mean = max(float(np.abs(m).max()) for m in means)
+    max_std = max(float(s.max()) for s in stds)
+    vmin_m, vmax_m = -max_abs_mean, +max_abs_mean
+    vmin_s, vmax_s = 0.0, max_std if max_std > 0 else 1e-12
+
+    # Grid dims
+    import math
+
+    n = len(setting_stats)
+    if ncols is None and nrows is None:
+        ncols, nrows = 2, math.ceil(n / 2)
+    elif ncols is None:
+        ncols = math.ceil(n / nrows)
+    elif nrows is None:
+        nrows = math.ceil(n / ncols)
+    else:
+        if ncols * nrows < n:
+            nrows = math.ceil(n / ncols)
+
+    # Order facets per the labels list
+    ordered_keys = []
+    for (h, it), label in zip(pairs, facet_labels):
+        if (h, it) in setting_stats:
+            ordered_keys.append(((h, it), label))
+
+    # MEAN figure
+    if show in {"mean", "both"}:
+        fig_m, axes_m = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(figsize_each[0] * ncols, figsize_each[1] * nrows),
+            squeeze=False,
+        )
+        for idx, ((h, it), label) in enumerate(ordered_keys):
+            r, c = divmod(idx, ncols)
+            ax = axes_m[r][c]
+            mean_o, _ = setting_stats[(h, it)]
+            im = ax.imshow(mean_o, cmap=cmap_mean, vmin=0, vmax=1, aspect="auto")
+            ax.set_title("%s = %s — mean" % (facet_by, label))
+            ax.set_xlabel("time t")
+            ax.set_ylabel("neurons")
+            _style_axes(ax, font_scale=font_scale)
+            if c == ncols - 1:
+                cbar = fig_m.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                _style_cbar(cbar, font_scale=font_scale)
+        # hide empties
+        total = nrows * ncols
+        for j in range(len(ordered_keys), total):
+            r, c = divmod(j, ncols)
+            axes_m[r][c].axis("off")
+        fig_m.tight_layout()
+        plt.show()
+
+    # STD figure
+    if show in {"std", "both"}:
+        fig_s, axes_s = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(figsize_each[0] * ncols, figsize_each[1] * nrows),
+            squeeze=False,
+        )
+        for idx, ((h, it), label) in enumerate(ordered_keys):
+            r, c = divmod(idx, ncols)
+            ax = axes_s[r][c]
+            _, std_o = setting_stats[(h, it)]
+            im = ax.imshow(
+                std_o, cmap=cmap_std, vmin=vmin_s, vmax=vmax_s, aspect="auto"
+            )
+            ax.set_title("%s = %s — std" % (facet_by, label))
+            ax.set_xlabel("time t")
+            ax.set_ylabel("neurons")
+            _style_axes(ax, font_scale=font_scale)
+            if c == ncols - 1:
+                cbar = fig_s.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                _style_cbar(cbar, font_scale=font_scale)
+        total = nrows * ncols
+        for j in range(len(ordered_keys), total):
+            r, c = divmod(j, ncols)
+            axes_s[r][c].axis("off")
+        fig_s.tight_layout()
+        plt.show()
+
+
+#########################################################################################################################################################################################       Prediction          ########################### ################################################################################
+################################################################################
+
+
+# -------------------
+# Core primitives
+# -------------------
+def make_noise_like(
+    X_in: torch.Tensor,
+    scale: float = 0.01,
+    seed: Optional[int] = 0,
+) -> torch.Tensor:
+    """
+    X_in: (1, T, N) tensor; noise std = scale * max(|X_in|)
+    """
+    rng = np.random.default_rng(seed)
+    T, N = X_in.shape[1], X_in.shape[2]
+    sigma = float(torch.as_tensor(X_in).abs().max().item()) * scale
+    Z = rng.normal(0.0, sigma, size=(1, T, N)).astype(np.float32)
+    return torch.from_numpy(Z)
+
+
+def forward_sequence(
+    state_dict: Dict[str, torch.Tensor],
+    X: torch.Tensor,  # (1, T, N)
+    N: int,
+    HN: int,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+) -> torch.Tensor:
+    """
+    Run Elman over sequence X (no grad). Returns outputs (1, T, N).
+    """
+    model = Elman(N, HN, N).to(device)
+    if activation is not None:
+        model.act = activation
+    model.load_state_dict(state_dict, strict=False)
+    model.eval()
+
+    X = X.to(device)
+    T = X.shape[1]
+    h = torch.zeros(1, 1, HN, device=device)
+    outs = torch.empty(1, T, N, device=device)
+    with torch.no_grad():
+        for t in range(T):
+            o, h = model(X[:, t : t + 1, :], h)
+            outs[:, t, :] = o
+    return outs.detach().cpu()
+
+
+# -------------------
+# Single-run prediction (optionally plot)
+# -------------------
+def prediction_single_run(
+    model_path: Union[str, Path],
+    N: int = 100,
+    SeqN: int = 100,
+    HN: int = 100,
+    input_type: str = "gaussian",
+    prefix_T: int = 10,  # how many initial timesteps use true inputs
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    *,
+    data_dir: Optional[Union[str, Path]] = None,
+    noise_scale: float = 0.01,
+    noise_seed: Optional[int] = 0,
+    plot: bool = True,
+    font_scale: float = 1.0,
+    title_tag: Optional[str] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Returns:
+      Xpred: (N, T), Y_true: (N, T), Y_out: (N, T) as numpy arrays.
+    """
+    # Load dataset matching the encoding
+    X_in, Y_true = _load_dataset_X_and_Y(
+        N=N, SeqN=SeqN, input_type=input_type, data_dir=data_dir
+    )
+    T = X_in.shape[1]
+    prefix_T = max(0, min(prefix_T, T))
+
+    # Build prediction input: noise with a real prefix
+    X_noise = make_noise_like(X_in, scale=noise_scale, seed=noise_seed)
+    X_pred = X_noise.clone()
+    if prefix_T > 0:
+        X_pred[:, :prefix_T, :] = X_in[:, :prefix_T, :]
+
+    ckpt = _load_ckpt(model_path, map_location=device)
+    state_dict = ckpt["state_dict"]
+    Y_out = forward_sequence(
+        state_dict, X_pred, N=N, HN=HN, activation=activation, device=device
+    )
+
+    # (1,T,N) -> (N,T)
+    Xin = X_pred[0].T.numpy()
+    Yt = Y_true[0].T.numpy()
+    Yo = Y_out[0].T.numpy()
+
+    if plot:
+        data = [Xin, Yt, Yo]
+        titles = [
+            "Prediction input ($x_t$)",
+            "Target (%s)" % input_type,
+            "Output on prediction input ($\\hat{y}_t$)",
+        ]
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4.5))
+        for i, ax in enumerate(axes):
+            im = ax.imshow(data[i], aspect="auto")
+            ax.set_title(titles[i])
+            ax.set_xlabel("time t")
+            ax.set_ylabel("neurons")
+            _style_axes(ax, font_scale=font_scale)
+            cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            _style_cbar(cbar, font_scale=font_scale)
+        supt = (
+            title_tag
+            if title_tag
+            else "Prediction (%s, prefix_T=%d)" % (input_type, prefix_T)
+        )
+        fig.suptitle(supt, fontsize=16 * font_scale)
+        fig.tight_layout()
+        plt.show()
+
+    return Xin, Yt, Yo
+
+
+# -------------------
+# Multirun aggregation: mean/std of prediction OUTPUT on shared X_pred
+# -------------------
+def compute_prediction_for_run(
+    model_path: Union[str, Path],
+    X_pred: torch.Tensor,  # (1, T, N)
+    N=100,
+    HN=100,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+) -> np.ndarray:
+    ckpt = _load_ckpt(model_path, map_location=device)
+    state_dict = ckpt["state_dict"]
+    Y_out = forward_sequence(
+        state_dict, X_pred, N=N, HN=HN, activation=activation, device=device
+    )  # (1,T,N)
+    return Y_out[0].T.numpy()  # (N,T)
+
+
+def collect_prediction_outputs_for_setting(
+    hidden_init: str,
+    input_type: str,
+    N: int = 100,
+    SeqN: int = 100,
+    HN: int = 100,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    data_dir: Optional[Union[str, Path]] = None,
+    noise_scale: float = 0.01,
+    noise_seed: Optional[int] = 0,
+    prefix_T: int = 10,
+) -> Tuple[np.ndarray, np.ndarray, List[Tuple[str, np.ndarray]]]:
+    """
+    Returns:
+      Xpred: (N,T), Y_true: (N,T), list_of_Yo: List[(run_id, (N,T))]
+    All runs use the SAME X_pred for comparability.
+    """
+    X_in, Y_true = _load_dataset_X_and_Y(
+        N=N, SeqN=SeqN, input_type=input_type, data_dir=data_dir
+    )
+    T = X_in.shape[1]
+    prefix_T = max(0, min(prefix_T, T))
+
+    X_noise = make_noise_like(X_in, scale=noise_scale, seed=noise_seed)
+    X_pred = X_noise.clone()
+    if prefix_T > 0:
+        X_pred[:, :prefix_T, :] = X_in[:, :prefix_T, :]
+
+    paths = _find_run_paths(hidden_init, input_type)
+    outs: List[Tuple[str, np.ndarray]] = []
+    for rid, p in paths:
+        try:
+            Yo = compute_prediction_for_run(
+                p, X_pred, N=N, HN=HN, activation=activation, device=device
+            )
+            outs.append((rid, Yo))
+        except Exception as e:
+            print(
+                f"[WARN] Skipping {hidden_init}/{input_type} run {rid} at {p}: {type(e).__name__}: {e}"
+            )
+    return X_pred[0].T.numpy(), Y_true[0].T.numpy(), outs
+
+
+def aggregate_prediction_outputs(
+    outs: List[np.ndarray],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    outs: list of (N,T) arrays
+    Returns: (mean_out, std_out) both (N,T)
+    """
+    if not outs:
+        raise ValueError("No outputs to aggregate.")
+    stack = np.stack(outs, axis=0)  # [n_runs, N, T]
+    mean_o = stack.mean(axis=0)
+    std_o = stack.std(axis=0, ddof=1) if stack.shape[0] > 1 else np.zeros_like(stack[0])
+    return mean_o, std_o
+
+
+# -------------------
+# Faceted plotting of aggregated prediction outputs (mean/std)
+# -------------------
+def _compute_grid(
+    n: int, ncols: Optional[int], nrows: Optional[int]
+) -> Tuple[int, int]:
+    if ncols is None and nrows is None:
+        ncols, nrows = 2, math.ceil(n / 2)
+    elif ncols is None:
+        ncols = math.ceil(n / nrows)
+    elif nrows is None:
+        nrows = math.ceil(n / ncols)
+    else:
+        if ncols * nrows < n:
+            nrows = math.ceil(n / ncols)
+    return nrows, ncols
+
+
+def plot_prediction_aggregates(
+    hidden_inits: Union[str, List[str]],
+    input_types: Union[str, List[str]],
+    facet_by: str = "input_type",  # {"input_type","hidden_init"}
+    show: str = "both",  # {"mean","std","both"}
+    N: int = 100,
+    SeqN: int = 100,
+    HN: int = 100,
+    activation: Optional[nn.Module] = nn.Sigmoid(),
+    device: str = "cpu",
+    data_dir: Optional[Union[str, Path]] = None,
+    noise_scale: float = 0.01,
+    noise_seed: Optional[int] = 0,
+    prefix_T: int = 10,
+    ncols: Optional[int] = 2,
+    nrows: Optional[int] = None,
+    figsize_each: Tuple[int, int] = (5, 4),
+    cmap_mean: str = "viridis",
+    cmap_std: str = "magma",
+    font_scale: float = 1.0,
+) -> None:
+    """
+    Each facet = one (hidden_init, input_type) setting.
+    Inside each facet: aggregate across runs only (mean/std) on a shared X_pred.
+    """
+    pairs, facet_labels = _facet_pairs(hidden_inits, input_types, facet_by)
+
+    setting_stats = {}  # (h,i) -> (mean_out, std_out)
+    for (h, it), label in zip(pairs, facet_labels):
+        Xpred, Yt, outs = collect_prediction_outputs_for_setting(
+            h,
+            it,
+            N=N,
+            SeqN=SeqN,
+            HN=HN,
+            activation=activation,
+            device=device,
+            data_dir=data_dir,
+            noise_scale=noise_scale,
+            noise_seed=noise_seed,
+            prefix_T=prefix_T,
+        )
+        if not outs:
+            print("[WARN] No runs for setting %s/%s; skipping." % (h, it))
+            continue
+        mean_o, std_o = aggregate_prediction_outputs([o for _, o in outs])
+        setting_stats[(h, it)] = (mean_o, std_o)
+
+    if not setting_stats:
+        print("[INFO] Nothing to plot.")
+        return
+
+    means = [m for (m, s) in setting_stats.values()]
+    stds = [s for (m, s) in setting_stats.values()]
+    max_abs_mean = max(float(np.abs(m).max()) for m in means)
+    max_std = max(float(s.max()) for s in stds)
+    vmin_m, vmax_m = -max_abs_mean, +max_abs_mean
+    vmin_s, vmax_s = 0.0, max_std if max_std > 0 else 1e-12
+
+    import math
+
+    n = len(setting_stats)
+    if ncols is None and nrows is None:
+        ncols, nrows = 2, math.ceil(n / 2)
+    elif ncols is None:
+        ncols = math.ceil(n / nrows)
+    elif nrows is None:
+        nrows = math.ceil(n / ncols)
+    else:
+        if ncols * nrows < n:
+            nrows = math.ceil(n / ncols)
+
+    ordered_keys = []
+    for (h, it), label in zip(pairs, facet_labels):
+        if (h, it) in setting_stats:
+            ordered_keys.append(((h, it), label))
+
+    # MEAN
+    if show in {"mean", "both"}:
+        fig_m, axes_m = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(figsize_each[0] * ncols, figsize_each[1] * nrows),
+            squeeze=False,
+        )
+        for idx, ((h, it), label) in enumerate(ordered_keys):
+            r, c = divmod(idx, ncols)
+            ax = axes_m[r][c]
+            mean_o, _ = setting_stats[(h, it)]
+            im = ax.imshow(mean_o, cmap=cmap_mean, vmin=0, vmax=1, aspect="auto")
+            ax.set_title(
+                "%s = %s — output mean (prefix_T=%d)" % (facet_by, label, prefix_T)
+            )
+            ax.set_xlabel("time t")
+            ax.set_ylabel("neurons")
+            _style_axes(ax, font_scale=font_scale)
+            if c == ncols - 1:
+                cbar = fig_m.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                _style_cbar(cbar, font_scale=font_scale)
+        total = nrows * ncols
+        for j in range(len(ordered_keys), total):
+            r, c = divmod(j, ncols)
+            axes_m[r][c].axis("off")
+        fig_m.tight_layout()
+        plt.show()
+
+    # STD
+    if show in {"std", "both"}:
+        fig_s, axes_s = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(figsize_each[0] * ncols, figsize_each[1] * nrows),
+            squeeze=False,
+        )
+        for idx, ((h, it), label) in enumerate(ordered_keys):
+            r, c = divmod(idx, ncols)
+            ax = axes_s[r][c]
+            _, std_o = setting_stats[(h, it)]
+            im = ax.imshow(
+                std_o, cmap=cmap_std, vmin=vmin_s, vmax=vmax_s, aspect="auto"
+            )
+            ax.set_title(
+                "%s = %s — output std (prefix_T=%d)" % (facet_by, label, prefix_T)
+            )
+            ax.set_xlabel("time t")
+            ax.set_ylabel("neurons")
+            _style_axes(ax, font_scale=font_scale)
+            if c == ncols - 1:
+                cbar = fig_s.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                _style_cbar(cbar, font_scale=font_scale)
+        total = nrows * ncols
+        for j in range(len(ordered_keys), total):
+            r, c = divmod(j, ncols)
+            axes_s[r][c].axis("off")
+        fig_s.tight_layout()
+        plt.show()

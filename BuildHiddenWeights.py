@@ -39,7 +39,7 @@ def plot_weight_all(
     circle = plt.Circle((0, 0), radius, fill=False, linestyle="--")
     axes[2].add_artist(circle)
 
-    # NEW: unit circle overlay
+    # unit circle overlay
     if show_unit_circle and unit_radius is not None and unit_radius > 0:
         unit = plt.Circle(
             (0, 0),
@@ -82,7 +82,10 @@ def svd_sigma_max_np(W: np.ndarray) -> float:
 
 
 def scale_to_gain_np(W: np.ndarray, target_gain: float) -> Tuple[np.ndarray, float]:
-    """Return (scaled_W, sigma_before). Scales W so σ_max == target_gain."""
+    """
+    Scale W by a scalar so that its spectral norm (largest singular value) == target_gain.
+    Returns (scaled_W, original_sigma_max).
+    """
     smax = svd_sigma_max_np(W)
     if smax > 0.0:
         W = (target_gain / smax) * W
@@ -90,7 +93,9 @@ def scale_to_gain_np(W: np.ndarray, target_gain: float) -> Tuple[np.ndarray, flo
 
 
 def gain_tag(g: float) -> str:
-    # e.g., 0.90 -> "gain0p90"
+    """e.g. 0.90 -> 'gain0p90'"""
+    import re
+
     return "gain" + re.sub(r"\.", "p", f"{g:.2f}")
 
 
@@ -174,7 +179,18 @@ def add_gaussian_noise_np(
     return W
 
 
-# --- quick, readable stats for one matrix ---
+def get_numpy_weights(model) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Returns:
+      W_hh: (H,H), W_xh: (H,I), W_hy: (O,H)
+    NOTE: if you've fixed W_xh to identity in the notebook, this simply reads that identity.
+    """
+    W_hh = model.rnn.weight_hh_l0.detach().cpu().numpy()
+    W_xh = model.rnn.weight_ih_l0.detach().cpu().numpy()
+    W_hy = model.linear.weight.detach().cpu().numpy()
+    return W_hh, W_xh, W_hy
+
+
 def summarize_matrix(W: np.ndarray, name: str, target_gain: float = None):
     meta = with_stats_meta(W)
     mean = meta["mean"]
@@ -191,7 +207,6 @@ def summarize_matrix(W: np.ndarray, name: str, target_gain: float = None):
     print(line)
 
 
-# --- summarize many matrices at once ---
 def summarize_many(named_mats, target_gain: float = None):
     """
     named_mats: list of (name, W) tuples
@@ -202,22 +217,182 @@ def summarize_many(named_mats, target_gain: float = None):
     print("===========================")
 
 
-# --- assert/check that gains are aligned ---
-def check_gain_alignment(named_mats, target_gain: float, rtol: float = 1e-3):
+def decompose_sym_skew(W: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Print OK/FAIL per matrix and return a boolean.
-    rtol=1e-3 means within 0.1% relative error by default.
+    Returns (W_sym, W_skew) where:
+      W_sym  = (W + W.T)/2         (symmetric component)
+      W_skew = (W - W.T)/2         (skew-symmetric (asymmetric) component)
     """
-    ok_all = True
-    print(f"=== Gain alignment check (target_gain={target_gain}) ===")
-    for name, W in named_mats:
-        smax = svd_sigma_max_np(W)
-        rel_err = abs(smax - target_gain) / max(target_gain, 1e-12)
-        status = "OK" if rel_err <= rtol else "FAIL"
-        print(f"[{name:>20}] σ_max={smax:.6f}  rel_err={100*rel_err:.3f}%  -> {status}")
-        ok_all &= rel_err <= rtol
-    print("===============================================")
-    return ok_all
+    W_sym = 0.5 * (W + W.T)
+    W_skew = 0.5 * (W - W.T)
+    return W_sym, W_skew
+
+
+def plot_sym_asym(W: np.ndarray, base_title: str = "W"):
+    """Plot symmetric and skew components with your plot_weight_all."""
+    W_sym, W_skew = decompose_sym_skew(W)
+    summarize_matrix(W_sym, f"{base_title} — symmetric")
+    summarize_matrix(W_skew, f"{base_title} — skew")
+    plot_weight_all(W_sym, title=f"{base_title} (symmetric)")
+    plot_weight_all(W_skew, title=f"{base_title} (skew / asymmetric)")
+
+
+def estimate_J_tanh_from_model(
+    net: nn.Module,
+    X_batch: torch.Tensor,
+    h0: torch.Tensor,
+    W_hh_override: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Run the model (optionally with a temporary W_hh override) to estimate:
+      gamma: (H,)  with gamma_i = E[ 1 - h_i^2 ] over batch & time
+      J_tanh = diag(gamma) as a dense (H,H) numpy array
+    """
+    # optional temporary override of W_hh so J_tanh matches *that* W
+    old = None
+    if W_hh_override is not None:
+        with torch.no_grad():
+            old = net.rnn.weight_hh_l0.detach().cpu().clone()
+            net.rnn.weight_hh_l0.copy_(
+                torch.tensor(
+                    W_hh_override,
+                    dtype=net.rnn.weight_hh_l0.dtype,
+                    device=net.rnn.weight_hh_l0.device,
+                )
+            )
+
+    net.eval()
+    with torch.no_grad():
+        # forward uses your Elman class: returns (probs, hidden_states)
+        probs, z = net(X_batch, h0)  # z: (B,T,H)
+        gamma_t = (1.0 - z**2).mean(dim=(0, 1))  # (H,)
+        gamma = gamma_t.detach().cpu().numpy()
+
+    # restore original W_hh if overridden
+    if old is not None:
+        with torch.no_grad():
+            net.rnn.weight_hh_l0.copy_(old)
+
+    J = np.diag(gamma.astype(np.float32))
+    return gamma, J
+
+
+def make_A_open(W_hh: np.ndarray, gamma: np.ndarray) -> np.ndarray:
+    """
+    A_open = diag(gamma) @ W_hh  (implemented as row-wise scaling gamma[:,None]*W_hh)
+    """
+    return (gamma[:, None] * W_hh).astype(np.float32)
+
+
+def open_loop_gain(W_hh: np.ndarray, gamma: np.ndarray) -> float:
+    """σ_max(A_open)"""
+    return svd_sigma_max_np(make_A_open(W_hh, gamma))
+
+
+def scale_hidden_to_open_loop_gain(
+    W_hh: np.ndarray,
+    gamma: np.ndarray,
+    target_gain: float,
+) -> Tuple[np.ndarray, Dict]:
+    """
+    Scale ONLY W_hh -> alpha * W_hh so that σ_max( J_tanh · (alpha W_hh) ) = target_gain.
+    With fixed J_tanh estimate (from current data), this is a one-liner:
+      alpha = target_gain / σ_max( J_tanh · W_hh )
+    Returns (scaled_W_hh, info).
+    """
+    A = make_A_open(W_hh, gamma)
+    s_before = svd_sigma_max_np(A)
+    if s_before <= 0:
+        return W_hh.copy(), {
+            "alpha": 1.0,
+            "s_before": s_before,
+            "s_after": s_before,
+            "status": "degenerate",
+        }
+    alpha = float(target_gain / s_before)
+    W_scaled = (alpha * W_hh).astype(np.float32)
+    s_after = svd_sigma_max_np(make_A_open(W_scaled, gamma))
+    info = {"alpha": alpha, "s_before": s_before, "s_after": s_after, "status": "ok"}
+    return W_scaled, info
+
+
+# ---------- simple linear open-loop simulation h_t = W_hh h_{t-1} + x_t ----------
+def simulate_linear_open_loop(
+    W_hh: np.ndarray,
+    X_one: np.ndarray,  # shape (T, H) — one sequence of encodings
+    h0: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    Simulate h_t = W_hh h_{t-1} + x_t (ignoring tanh), useful for intuition/debug.
+    Returns H of shape (T, H).
+    """
+    T, H = X_one.shape
+    h = np.zeros(H, dtype=np.float32) if h0 is None else h0.astype(np.float32)
+    Hs = np.zeros((T, H), dtype=np.float32)
+    for t in range(T):
+        h = (W_hh @ h) + X_one[t]
+        Hs[t] = h
+    return Hs
+
+
+def plot_hidden_heatmap(H: np.ndarray, title: str = "Hidden trajectory (linear OL)"):
+    """Quick heatmap for the simulated linear open-loop trajectory."""
+    plt.figure(figsize=(10, 3))
+    plt.imshow(H.T, aspect="auto", origin="lower")
+    plt.colorbar(fraction=0.046, pad=0.04)
+    plt.xlabel("time")
+    plt.ylabel("unit")
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+# ---------- one-stop helper you can call from the notebook ----------
+def open_loop_gain_match_and_plots(
+    net: nn.Module,
+    X_batch: torch.Tensor,
+    h0: torch.Tensor,
+    W_hh_init: np.ndarray,
+    target_gain: float,
+    label: str = "init",
+    do_plots: bool = True,
+) -> Tuple[np.ndarray, Dict]:
+    """
+    For a proposed hidden matrix W_hh_init:
+      1) Split into symmetric/skew and plot.
+      2) Estimate J_tanh from data with *this* W_hh (temporary override).
+      3) Build A_open, print stats & gain.
+      4) Scale W_hh for target open-loop gain, verify, and plot.
+    Returns (W_hh_scaled, info).
+    """
+    # (1) sym / skew
+    if do_plots:
+        plot_sym_asym(W_hh_init, base_title=f"{label}: W_hh (before)")
+
+    # (2) J_tanh estimated on this W_hh
+    gamma, J = estimate_J_tanh_from_model(net, X_batch, h0, W_hh_override=W_hh_init)
+    summarize_matrix(J, f"{label}: J_tanh (diag)", target_gain=None)
+    if do_plots:
+        plot_weight_all(J, title=f"{label}: J_tanh (diag)")
+
+    # (3) A_open before scaling
+    A_open = make_A_open(W_hh_init, gamma)
+    summarize_matrix(A_open, f"{label}: A_open (before)")
+    if do_plots:
+        plot_weight_all(A_open, title=f"{label}: A_open (before)")
+
+    # (4) scale W to hit target open-loop gain
+    W_scaled, info = scale_hidden_to_open_loop_gain(W_hh_init, gamma, target_gain)
+    print(f"{label}: open-loop gain match info ->", info)
+
+    # verify & plots
+    A_after = make_A_open(W_scaled, gamma)
+    summarize_matrix(A_after, f"{label}: A_open (after)", target_gain=target_gain)
+    if do_plots:
+        plot_weight_all(W_scaled, title=f"{label}: W_hh (after gain match)")
+        plot_weight_all(A_after, title=f"{label}: A_open (after, target={target_gain})")
+
+    return W_scaled, info
 
 
 # =========================
@@ -257,21 +432,51 @@ def build_xavier(n_in, n_out, gain=1.0, seed=None, target_gain: Optional[float] 
 
 
 def build_shift(
-    n,
-    off=1.0,
-    target_var=None,
-    cyclic=False,
+    n: int,
+    value: float = 1.0,
+    offset: int = 1,
+    cyclic: bool = False,
+    target_var: Optional[float] = None,
     target_gain: Optional[float] = None,
-    verbose=False,
-):
-    """Upper-shift (optionally cyclic), then optional variance report and gain match."""
-    W = np.zeros((n, n), dtype=np.float32)
-    idx = np.arange(n - 1)
-    W[idx, idx + 1] = off
-    if cyclic:
-        W[-1, 0] = off
+    verbose: bool = False,
+) -> np.ndarray:
+    """
+    Single shifted band:
+      W[i, i+offset] = value   (wraps if cyclic, else clipped)
+    Special case: offset=0, value=1.0 -> identity.
 
-    # (optional) variance rescale for reporting parity
+    Args
+    ----
+    n : int
+    value : float
+        The constant placed on the shifted diagonal.
+    offset : int
+        0 = main diagonal, +1 = superdiagonal, -1 = subdiagonal, etc.
+    cyclic : bool
+        If True, wrap indices modulo n.
+    target_var : float or None
+        If provided, rescale to match this entrywise variance (report only).
+    target_gain : float or None
+        If provided, rescale (last) so σ_max(W) == target_gain.
+    verbose : bool
+        Print pre/post scaling variances and gains.
+
+    Returns
+    -------
+    W : (n,n) float32
+    """
+    W = np.zeros((n, n), dtype=np.float32)
+    idx = np.arange(n)
+
+    if cyclic:
+        j = (idx + offset) % n
+        W[idx, j] = value
+    else:
+        j = idx + offset
+        mask = (j >= 0) & (j < n)
+        W[idx[mask], j[mask]] = value
+
+    # optional variance rescale (for reporting parity)
     if target_var is not None:
         var_emp = float(((W - W.mean()) ** 2).mean())
         if verbose:
@@ -281,48 +486,87 @@ def build_shift(
         if verbose:
             print(f"[shift] var after : {float(((W - W.mean()) ** 2).mean()):.6f}")
 
-    # (primary) gain match
+    # optional gain match (σ_max)
     if target_gain is not None:
         W, s0 = scale_to_gain_np(W, target_gain)
         if verbose:
             print(f"[shift] σ_max before {s0:.4f} → after {svd_sigma_max_np(W):.4f}")
+
     return W
 
 
 def build_mexican_hat(
-    n,
-    sigma=None,
-    target_var=None,
-    cyclic=False,
+    n: int,
+    sigma: Optional[float] = None,
+    diag_offset: int = 0,
+    cyclic: bool = False,
+    target_var: Optional[float] = None,
     target_gain: Optional[float] = None,
-    verbose=False,
-):
+    verbose: bool = False,
+) -> np.ndarray:
     """
-    1D Mexican-hat Toeplitz (or circulant if cyclic). Then optional variance rescale and gain match.
+    1D Mexican-hat kernel placed as a Toeplitz/circulant matrix.
+    You can 'shift' the kernel off the main diagonal by diag_offset.
+
+    Kernel (even, centered at 0):
+      k(m) = [1 - (d(m)^2 / sigma^2)] * exp( - d(m)^2 / (2 sigma^2) )
+    where d(m) =
+      - non-cyclic: abs(m)
+      - cyclic    : min(|m|, n - |m|)  (circular distance)
+
+    Non-cyclic (Toeplitz):
+      W[i,j] = k( (i - j) - diag_offset ), clipped to bounds.
+
+    Cyclic (circulant):
+      W[i,j] = k( (i - j - diag_offset) mod n ), using the *circular distance*
+               to compute k so it's still an even “bump”, just phase-shifted.
+
+    Setting diag_offset=+1 moves the bump one above the diagonal.
+
+    Returns
+    -------
+    W : (n,n) float32
     """
     if sigma is None:
-        sigma = n / 10
+        sigma = n / 10.0
+
     if cyclic:
-        d_vals = np.arange(n, dtype=np.int64)
-        d_vals = np.minimum(d_vals, n - d_vals).astype(np.float64)
-        k = (1.0 - (d_vals**2) / (sigma**2)) * np.exp(
-            -(d_vals**2) / (2.0 * sigma**2)
-        )
-        idx = np.arange(n)
-        d = np.abs(idx[:, None] - idx[None, :])
-        d = np.minimum(d, n - d)
-        W = k[d].astype(np.float32)
+        # signed offsets in range [-floor(n/2), ..., floor((n-1)/2)]
+        offs = np.arange(n)
+        # represent modulo-n offsets with a signed view:
+        offs_signed = ((offs + n // 2) % n) - n // 2
+        # circular distance for the even kernel
+        d = np.abs(offs_signed).astype(np.float64)
+        k = (1.0 - (d**2) / (sigma**2)) * np.exp(-(d**2) / (2.0 * sigma**2))
+        k = k.astype(np.float32)
+
+        # build circulant with a phase shift = diag_offset
+        W = np.zeros((n, n), dtype=np.float32)
+        i = np.arange(n)
+        for j in range(n):
+            # offset (i - j - diag_offset) mod n
+            m = (i - j - diag_offset) % n
+            W[i, j] = k[m]
+
     else:
-        center = n // 2
-        x = np.arange(-center, n - center, dtype=np.float64)
-        k = (1.0 - (x**2) / (sigma**2)) * np.exp(-(x**2) / (2.0 * sigma**2))
+        # Toeplitz with shift: use integer offsets m = (i - j) - diag_offset
+        center = 0  # kernel centered at 0 offset
+        # Precompute a reasonably wide kernel vector k[m] for m in [-(n-1)..(n-1)]
+        m = np.arange(-(n - 1), (n - 1) + 1)
+        d = np.abs(m).astype(np.float64)
+        k = (1.0 - (d**2) / (sigma**2)) * np.exp(-(d**2) / (2.0 * sigma**2))
+        k = k.astype(np.float32)
+
+        W = np.zeros((n, n), dtype=np.float32)
         i = np.arange(n)[:, None]
         j = np.arange(n)[None, :]
-        off = (i - j) + center
-        mask = (off >= 0) & (off < n)
-        W = np.zeros((n, n), dtype=np.float32)
-        W[mask] = k[off[mask]].astype(np.float32)
+        off = (i - j) - diag_offset  # shift the bump
+        # map off to index in k (centered at index (n-1))
+        k_idx = off + (n - 1)
+        mask = (k_idx >= 0) & (k_idx < k.shape[0])
+        W[mask] = k[k_idx[mask]]
 
+    # optional variance rescale
     if target_var is not None:
         var_emp = float(((W - W.mean()) ** 2).mean())
         if verbose:
@@ -332,32 +576,59 @@ def build_mexican_hat(
         if verbose:
             print(f"[MH] var after : {float(((W - W.mean()) ** 2).mean()):.6f}")
 
+    # optional gain match
     if target_gain is not None:
         W, s0 = scale_to_gain_np(W, target_gain)
         if verbose:
             print(f"[MH] σ_max before {s0:.4f} → after {svd_sigma_max_np(W):.4f}")
+
     return W
 
 
 def build_tridiag(
-    n,
-    diag=1.0,
-    off=-1.0,
-    cyclic=False,
-    target_var=None,
+    n: int,
+    diag: float = 1.0,
+    off: float = -1.0,
+    diag_offset: int = 0,
+    cyclic: bool = False,
+    target_var: Optional[float] = None,
     target_gain: Optional[float] = None,
-    verbose=False,
-):
-    """(Cyclic) tridiagonal; optional variance rescale and gain match."""
+    verbose: bool = False,
+) -> np.ndarray:
+    """
+    Tridiagonal band *shifted* by diag_offset:
+      main band at (i, i+diag_offset) gets 'diag'
+      neighbors at (i, i+diag_offset±1) get 'off'
+    If cyclic=True, indices wrap around.
+
+    Examples
+    --------
+    diag_offset=0  : standard tri-diagonal (main on the diagonal)
+    diag_offset=+1 : main band on superdiagonal; neighbors at +2 and 0
+
+    Returns
+    -------
+    W : (n,n) float32
+    """
     W = np.zeros((n, n), dtype=np.float32)
     i = np.arange(n)
-    W[i, i] = diag
-    W[i[1:], i[:-1]] = off
-    W[i[:-1], i[1:]] = off
-    if cyclic:
-        W[0, -1] = off
-        W[-1, 0] = off
 
+    def set_band(delta: int, val: float):
+        if cyclic:
+            j = (i + delta) % n
+            W[i, j] += val
+        else:
+            j = i + delta
+            mask = (j >= 0) & (j < n)
+            W[i[mask], j[mask]] += val
+
+    # central band at offset=diag_offset
+    set_band(diag_offset, diag)
+    # neighbors
+    set_band(diag_offset + 1, off)
+    set_band(diag_offset - 1, off)
+
+    # optional variance rescale
     if target_var is not None:
         var_emp = float(((W - W.mean()) ** 2).mean())
         if verbose:
@@ -367,10 +638,12 @@ def build_tridiag(
         if verbose:
             print(f"[tri] var after : {float(((W - W.mean()) ** 2).mean()):.6f}")
 
+    # optional gain match
     if target_gain is not None:
         W, s0 = scale_to_gain_np(W, target_gain)
         if verbose:
             print(f"[tri] σ_max before {s0:.4f} → after {svd_sigma_max_np(W):.4f}")
+
     return W
 
 
@@ -408,64 +681,3 @@ def build_orthogonal(
         if verbose:
             print(f"[orth] σ_max before {s0:.4f} → after {svd_sigma_max_np(W):.4f}")
     return W
-
-
-@torch.no_grad()
-def rnn_default_init_stats(
-    input_dim,
-    hidden_dim,
-    *,
-    nonlinearity="tanh",
-    num_layers=1,
-    bidirectional=False,
-    repeats=1,
-    seed=None,
-    device="cpu",
-    dtype=torch.float32,
-):
-    if seed is not None:
-        torch.manual_seed(seed)
-
-    def one_sample():
-        rnn = nn.RNN(
-            input_dim,
-            hidden_dim,
-            num_layers=num_layers,
-            nonlinearity=nonlinearity,
-            bidirectional=bidirectional,
-        ).to(device=device, dtype=dtype)
-
-        stats = {}
-        dirs = 2 if bidirectional else 1
-        for layer in range(num_layers):
-            for d in range(dirs):
-                suf = f"l{layer}" + ("" if d == 0 else f"_reverse")
-                Wih = getattr(
-                    rnn, f"weight_ih_{suf}"
-                )  # (H, I) for layer 0 else (H, D*H)
-                Whh = getattr(rnn, f"weight_hh_{suf}")  # (H, H)
-                bih = getattr(rnn, f"bias_ih_{suf}")
-                bhh = getattr(rnn, f"bias_hh_{suf}")
-
-                stats[f"Wih_{suf}_mean"] = float(Wih.mean())
-                stats[f"Wih_{suf}_var"] = float(Wih.var(unbiased=False))
-                stats[f"Whh_{suf}_mean"] = float(Whh.mean())
-                stats[f"Whh_{suf}_var"] = float(Whh.var(unbiased=False))
-                stats[f"bih_{suf}_var"] = float(bih.var(unbiased=False))
-                stats[f"bhh_{suf}_var"] = float(bhh.var(unbiased=False))
-        return stats
-
-    # repeat to average across random seeds
-    out = None
-    for i in range(repeats):
-        if seed is not None:
-            torch.manual_seed(seed + i)
-        s = one_sample()
-        if out is None:
-            out = {k: 0.0 for k in s}
-        for k, v in s.items():
-            out[k] += v
-    if repeats > 1:
-        for k in out:
-            out[k] /= repeats
-    return out

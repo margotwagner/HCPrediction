@@ -72,17 +72,21 @@ def _extract_metrics_list(ckpt) -> Optional[List[Dict]]:
     return None
 
 
-def _extract_grad_list(ckpt) -> Optional[List[Dict]]:
-    """Extract gradient norms list from checkpoint dict. Returns None if not found."""
-    if ckpt is None:
-        return None
-    g = ckpt.get("grad_list", None)
-    if isinstance(g, list):
-        return g
-    return None
+def _extract_grad_list(ckpt):
+    """Return a list of gradient snapshots or an empty list."""
+    gl = ckpt.get("grad_list", None)
+    if gl is None:
+        return []
+    # Some runs may have been saved as tuple or np.obj arrays; normalize
+    if isinstance(gl, (list, tuple)):
+        return list(gl)
+    try:
+        return list(gl)
+    except Exception:
+        return []
 
 
-def _extract_history(ckpt, keep=("epoch", "loss", "grad_norm"), summarize=False):
+def _extract_history(ckpt, keep=("epoch", "loss", "grad_norm"), summarize=True):
     """
     Return a compact history dict with only scalar series that align with 'epoch'.
 
@@ -170,15 +174,48 @@ def _iter_multirun_files_limited(base_dir: Path, max_runs: int = 10):
             count += 1
 
 
-def _attach_epoch_to_list(lst: List[Dict], epoch_list=None) -> Optional[pd.DataFrame]:
-    """Given a list of dicts (e.g. grad snapshots), attach epoch number if available."""
-    if not lst:
+def _attach_epoch_to_list(rows, ckpt):
+    """
+    rows: list[dict] reduced gradient rows
+    ckpt: checkpoint dict (for recorded_epochs/recordep/history fallback)
+    """
+    import pandas as pd
+
+    if not rows:
         return None
-    df = pd.DataFrame(lst)
-    if epoch_list and len(epoch_list) == len(lst):
-        df["epoch"] = epoch_list
-    else:
-        df["epoch"] = range(len(lst))
+    df = pd.DataFrame(rows)
+
+    # Preferred: explicit recorded epochs
+    rec_epochs = ckpt.get("recorded_epochs", None)
+    if isinstance(rec_epochs, list) and len(rec_epochs) > 0:
+        n = min(len(rows), len(rec_epochs))
+        if n < len(rows) or n < len(rec_epochs):
+            print(
+                f"[WARN] grad rows ({len(rows)}) vs recorded_epochs ({len(rec_epochs)}) mismatch; truncating to {n}."
+            )
+        df = df.iloc[:n, :].copy()
+        df["epoch"] = [int(e) for e in rec_epochs[:n]]
+        return df
+
+    # Fallback: use history['epoch'] if available
+    hist_epochs = ckpt.get("history", {}).get("epoch", None)
+    if isinstance(hist_epochs, list) and len(hist_epochs) > 0:
+        n = min(len(rows), len(hist_epochs))
+        if n < len(rows) or n < len(hist_epochs):
+            print(
+                f"[WARN] grad rows ({len(rows)}) vs history epochs ({len(hist_epochs)}) mismatch; truncating to {n}."
+            )
+        df = df.iloc[:n, :].copy()
+        df["epoch"] = [int(e) for e in hist_epochs[:n]]
+        return df
+
+    # Last fallback: synthesize evenly spaced epochs using recordep (default 1)
+    rec_ep = int(ckpt.get("recordep", 1))
+    df["epoch"] = [i * rec_ep for i in range(len(df))]
+    print(
+        "[INFO] No explicit epoch indices for grads; synthesized using recordep =",
+        rec_ep,
+    )
     return df
 
 
@@ -270,38 +307,33 @@ def _summarize_metrics(
     return out
 
 
-def _reduce_grad_snapshot_paramwise(
-    snap: Dict[str, Dict[str, float]]
-) -> Dict[str, float]:
-    """Reduce nested gradient snapshot into flat scalars.
-    Expects:
-        snap["per_param"] : dict(param -> stats dict with keys: mean, std, etc)snap["per_group_norm] : dict(group -> float) (optional)
+def _reduce_grad_snapshot_paramwise(snap):
     """
-    if not isinstance(snap, dict) or "per_param" not in snap:
-        return ValueError("Gradient snapshot must be a dict with 'per_param' key.")
+    Expected 'snap' schema:
+      {
+        "per_param": {"<name>": {"l2_norm":..., "mean":..., "std":..., "cos_prev":...}, ...},
+        "per_group_norm": {"rnn": float, "linear": float, ...}
+      }
+    """
+    import numpy as np
 
-    per_param = snap.get("per_param", {})
+    per_param = (snap or {}).get("per_param", {}) or {}
+    per_group = (snap or {}).get("per_group_norm", {}) or {}
 
-    keys = ["mean", "std", "l2_norm", "mean_sq", "max_abs", "sparsity"]
-    out = {f"grad_{k}_sum": 0.0 for k in keys}
-    out.update({f"grad_{k}_max": float("-inf") for k in keys})
+    l2s = [p.get("l2_norm", np.nan) for p in per_param.values()]
+    means = [p.get("mean", np.nan) for p in per_param.values()]
+    stds = [p.get("std", np.nan) for p in per_param.values()]
+    cos = [p.get("cos_prev", np.nan) for p in per_param.values()]
 
-    count = 0
-    for stats in per_param.values():
-        count += 1
-        for k in keys:
-            v = float(stats.get(k, 0.0))
-            out[f"grad_{k}_sum"] += v
-            out[f"grad_{k}_max"] = max(out[f"grad_{k}_max"], v)
-
-    # finalize means
-    for k in keys:
-        out[f"grad_{k}_mean"] = out[f"grad_{k}_sum"] / count if count > 0 else 0.0
-
-    # surface per-group L2 if provided
-    for grp, val in snap.get("per_group_norm", {}).items():
-        out[f"grad_group_{grp}_l2_norm"] = float(val)
-
+    out = {
+        "grad_l2_sum": float(np.nansum(l2s)) if len(l2s) else np.nan,
+        "grad_l2_mean": float(np.nanmean(l2s)) if len(l2s) else np.nan,
+        "grad_mean_mean": float(np.nanmean(means)) if len(means) else np.nan,
+        "grad_std_mean": float(np.nanmean(stds)) if len(stds) else np.nan,
+        "grad_cos_prev_mean": float(np.nanmean(cos)) if len(cos) else np.nan,
+    }
+    for g, v in per_group.items():
+        out[f"group_{g}_l2"] = float(v)
     return out
 
 
@@ -320,45 +352,30 @@ def _save_df_csv(df: pd.DataFrame, path: Path) -> None:
 # Collection for one (hidden_init, input_type)
 # -------------------
 def collect_for_setting(hidden_init: str, input_type: str):
-    """Collect data for a given (hidden_init, input_type) setting.
-
-    Returns:
-        per_run_rows: List of dicts with per-run summary metrics
-        per_run_timeseries: Dict with keys:
-            "losses": List of loss series (list of lists)
-            "metrics_df_list": List of DataFrames with metrics time series
-            "grad_df_list": List of DataFrames with gradient norms time series
-            "history_df_list": List of DataFrames with history time series
-    """
     base = MODEL_ROOT / hidden_init / input_type
-    per_run_rows = []
-    losses_all = []
-    metrics_df_list = []
-    grad_df_list = []
-    history_df_list = []
+    per_run_rows, losses_all = [], []
+    metrics_df_list, grad_df_list, history_df_list = [], [], []
 
     for run_id, p in _iter_multirun_files(base):
         print(f"Run {run_id}: {p}")
-        # Load checkpoint
         ckpt = _load_torch(p)
 
-        # Extract loss series
+        # --- losses ---
         loss_series = _extract_loss_series(ckpt)
         if loss_series:
             losses_all.append(loss_series)
-
-        # Load loss metrics from loss_series
         m = _metrics_from_loss(loss_series)
 
-        # Get metrics time series (over recorded epochs)
+        # --- metrics timeseries ---
         mlist = _extract_metrics_list(ckpt)
         metrics_df = None
         if mlist:
             metrics_df = _metrics_df_from_list(mlist, run_id)
             metrics_df_list.append(metrics_df)
-
-        # Summarize per-epoch metrics into per-run scalars and merge into row
         metrics_summary = _summarize_metrics(metrics_df, loss_series)
+
+        # --- (prepare per-run row but DON'T append yet) ---
+        row = None
         if m:
             row = {
                 "hidden_init": hidden_init,
@@ -369,20 +386,34 @@ def collect_for_setting(hidden_init: str, input_type: str):
                 **m,
                 **metrics_summary,
             }
-            per_run_rows.append(row)
+            # capture lambda if SymAsymRNN saved it
+            if metrics_df is not None and "lambda" in metrics_df.columns:
+                row["lambda_final"] = float(metrics_df["lambda"].iloc[-1])
 
-        # Get gradient norms time series (over recorded epochs)
+        # --- gradients timeseries ---
         glist = _extract_grad_list(ckpt)
-        if glist and isinstance(glist[0], dict):
-            reduced = [_reduce_grad_snapshot_paramwise(snap) for snap in glist]
-            gdf = _attach_epoch_to_list(
-                reduced, epoch_list=ckpt.get("history", {}).get("epoch", None)
+        if not glist:
+            print(
+                f"[WARN] No gradient snapshots in {p.name} (run {run_id}). "
+                "Check RecordEp/sample_batch_idx in training."
             )
-            if gdf is not None:
-                gdf["run_id"] = run_id
-                grad_df_list.append(gdf)
+            has_grads, n_grad_snaps, gdf = False, 0, None
+        else:
+            reduced_rows = [_reduce_grad_snapshot_paramwise(s) for s in glist]
+            gdf = _attach_epoch_to_list(reduced_rows, ckpt)
+            has_grads = gdf is not None and not gdf.empty
+            n_grad_snaps = 0 if gdf is None else len(gdf)
+            if not has_grads:
+                print(
+                    f"[WARN] Gradient DataFrame empty after attach for run {run_id} "
+                    "(epoch alignment issue?)."
+                )
 
-        # Get history time series
+        if has_grads:
+            gdf["run_id"] = run_id
+            grad_df_list.append(gdf)
+
+        # --- history timeseries ---
         history = _extract_history(
             ckpt, keep=("epoch", "loss", "grad_norm"), summarize=False
         )
@@ -390,6 +421,19 @@ def collect_for_setting(hidden_init: str, input_type: str):
             hist_df = pd.DataFrame(history)
             hist_df["run_id"] = run_id
             history_df_list.append(hist_df)
+
+        # --- add grad health fields into the row, then append ---
+        if row is not None:
+            row["has_grads"] = bool(has_grads)
+            row["n_grad_snaps"] = int(n_grad_snaps)
+            if has_grads:
+                row["first_grad_epoch"] = int(gdf["epoch"].min())
+                row["last_grad_epoch"] = int(gdf["epoch"].max())
+            else:
+                row["first_grad_epoch"] = None
+                row["last_grad_epoch"] = None
+            per_run_rows.append(row)
+
     return per_run_rows, {
         "losses": losses_all,
         "metrics_df_list": metrics_df_list,

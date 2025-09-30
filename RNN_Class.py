@@ -111,6 +111,58 @@ class ElmanRNN_pytorch_module_v2(nn.Module):
         return out, z
 
 
+class SymAsymRNN(nn.Module):
+    """
+    Modification of ElmanRNN_pytorch_module_v2 where hidden-to-hidden weights are constrained as W = λ * S + (1 - λ) * A, with λ trainable in [0, 1]. S = Symmetric component, A = antisymmetric component
+    """
+
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(SymAsymRNN).__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+
+        # store symmetric + antisymmetric bases
+        self.S = nn.Parameter(torch.empty(hidden_dim, hidden_dim))
+        self.A = nn.Parameter(torch.empty(hidden_dim, hidden_dim))
+        nn.init.orthogonal_(self.S)
+        nn.init.orthogonal_(self.A)
+
+        # trainable mixing weight
+        self.lmbda = nn.Parameter(torch.tensor(0.5))
+
+        # input/output modules
+        self.input_linear = nn.Linear(input_dim, hidden_dim)
+        self.linear = nn.Linear(hidden_dim, output_dim)
+
+        # add dummy attributes so Main_s4.py still works unchanged
+        self.rnn = None  # prevents AttributeErrors in fixi block
+        self.act = nn.Softmax(2)  # output nonlinearity (overridden in Main_s4.py)
+        self.tanh = torch.tanh  # recurrent nonlinearity (overridable in Main_s4.py)
+
+    def effective_W(self):
+        # λS + (1-λ)A, force symmetry/antisymmetry structure
+        S_sym = 0.5 * (self.S + self.S.T)
+        A_asym = 0.5 * (self.A - self.A.T)
+        return self.lmbda * S_sym + (1 - self.lmbda) * A_asym
+
+    def forward(self, x, h0):
+        W = self.effective_W()
+        T = x.size(1)
+        h = h0
+        outputs, hiddens = [], []
+
+        for t in range(T):
+            h = self.tanh(self.input_linear(x[:, t, :]) + h @ W.T)
+            y = self.act(self.linear(h))
+            outputs.append(y)
+            hiddens.append(h)
+
+        out = torch.stack(outputs, dim=1)
+        z = torch.stack(hiddens, dim=1)
+        return out, z
+
+
 class ElmanRNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         super(ElmanRNN, self).__init__()

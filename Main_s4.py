@@ -282,6 +282,18 @@ def main():
     deltat = end - start
     print("Total training time: {0:.1f} minuetes".format(deltat / 60), file=f)
 
+    # basic model config
+    model_cfg = {
+        "arch": args.net,
+        "input_dim": int(X.shape[-1]),
+        "hidden_dim": int(args.hidden_n),
+        "output_dim": int(Y.shape[-1]),
+    }
+
+    # seed info for closed-loop
+    warmup_context = X[:, :30].detach().cpu()  # first 30 steps, adjust length if needed
+    h0_eval = h0.detach().cpu()
+
     # save network input, state
     save_dict = {
         "state_dict": net.state_dict(),
@@ -291,6 +303,10 @@ def main():
         "metrics": metrics,
         "rng_init": rng_init,
         "init_hidden": init_hidden,
+        "rollout": {
+            "h0_eval": h0_eval,
+            "warmup_context": warmup_context,
+        },
     }
     torch.save(save_dict, args.savename + ".pth.tar")
 
@@ -402,6 +418,11 @@ def train_minibatch(
         else None,
     }
 
+    def _safe_sample_batch_idx(requested_idx: int, n_batches: int) -> int:
+        if n_batches <= 0:
+            return 0
+        return min(max(0, requested_idx), n_batches - 1)
+
     # main training loop with tqdm progress bar
     with tqdm(total=n_epochs, desc="Training", unit="epoch") as pbar:
         while stop == 0 and epoch < n_epochs:
@@ -420,6 +441,9 @@ def train_minibatch(
 
             num_batches = int(np.ceil(N / args.batch_size))
             bs = args.batch_size
+
+            # compute a safe snapshot batch index for this epoch
+            safe_b = _safe_sample_batch_idx(sample_batch_idx, num_batches)
 
             for b in range(num_batches):
                 start_idx = b * bs
@@ -440,14 +464,25 @@ def train_minibatch(
                 loss = loss1 + loss2
                 loss.backward()  # Does backpropagation and calculates gradients
 
-                # record grad for recording epoch on chosen minibatch
-                if (epoch % RecordEp == 0) and (b == sample_batch_idx):
+                # compute grad norm before clipping
+                gn = _total_grad_norm(net.parameters(), p=2.0)
+
+                # record on recording epochs and first epoch from safe batch
+                if ((epoch % RecordEp) == 0 or epoch == 0) and (b == safe_b):
                     prev_grad_stats = record_grads(
                         net, grad_list, prev_stats=prev_grad_stats
                     )
+                    # optional: quick health log
+                    print(
+                        f"[grad] epoch={epoch} batch={b}/{num_batches-1} norm={float(gn):.4f}"
+                    )
 
-                # compute grad norm before clipping
-                gn = _total_grad_norm(net.parameters(), p=2.0)
+                    # stash aligned snapshot bits
+                    grad_norm_for_record = gn
+                    y_hat_record = output.detach().cpu()
+                    h_t_record = h_t.detach().cpu()
+                    Xmini_record = X_mini.detach().cpu()
+                    Ymini_record = Y_mini.detach().cpu()
 
                 # optional gradient clipping
                 if use_clip:
@@ -457,14 +492,6 @@ def train_minibatch(
                 optimizer.zero_grad()
 
                 batch_losses.append(loss.item())
-
-                # save minibatch snapshot (IO, hidden, grad_norm)
-                if b == sample_batch_idx:
-                    grad_norm_for_record = gn
-                    y_hat_record = output.detach().cpu()
-                    h_t_record = h_t.detach().cpu()
-                    Xmini_record = X_mini.detach().cpu()
-                    Ymini_record = Y_mini.detach().cpu()
 
             # epoch-end bookkeeping
             epoch_loss = float(np.mean(batch_losses)) if batch_losses else float("nan")
@@ -552,7 +579,23 @@ def train_minibatch(
                         "tanh_sat": tanh_sat,
                     }
                 )
+
+                if isinstance(net, SymAsymRNN):
+                    metrics[-1]["lambda"] = float(net.lmbda.detach().cpu())
+                    torch.save(
+                        net.S.detach().cpu(),
+                        os.path.join(args.output_dir, f"S_epoch{epoch:06d}.pt"),
+                    )
+                    torch.save(
+                        net.A.detach().cpu(),
+                        os.path.join(args.output_dir, f"A_epoch{epoch:06d}.pt"),
+                    )
+
             epoch += 1
+
+    # sanity ping if nothing was captured
+    if len(grad_list) == 0:
+        print("[WARN] grad_list is EMPTY. Check RecordEp and sample_batch_idx.")
 
     return net, loss_list, history, grad_list, metrics, rng_init, init_hidden
 
@@ -692,6 +735,18 @@ def load_hidden_weight_into(
     Returns:
         model (mutated in-place)
     """
+    if isinstance(model, SymAsymRNN):
+        W = np.load(npy_path)
+        if W.shape[0] != W.shape[1]:
+            raise ValueError(f"Expected square (H,H) matrix, got shape {W.shape}")
+        thW = torch.as_tensor(W, dtype=torch.float32, device=device)
+        with torch.no_grad():
+            model.S.copy_(0.5 * (thW + thW.T))
+            model.A.copy_(0.5 * (thW - thW.T))
+        model.S.requires_grad = trainable
+        model.A.requires_grad = trainable
+        print(f"Loaded {npy_path} into SymAsymRNN (trainable={trainable})")
+        return model
 
     W = np.load(npy_path)
     if W.ndim != 2 or W.shape[0] != W.shape[1]:

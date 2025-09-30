@@ -4,7 +4,7 @@ Reusable plotting utilities for multirun RNN analyses.
 Functions assume the CSV exports created by your AggregateMultiruns.py:
 - per_run_metrics.csv
 - agg_metrics.csv
-- ts_bucketl.pkl
+- ts_bucket.pkl
 
 Dependency notes:
 - Uses matplotlib + seaborn for convenience
@@ -1202,12 +1202,21 @@ def plot_gradient_dynamics(
                 gcol = _pick_grad_col(df, grad_col_candidates)
                 if gcol is None:
                     continue
+                # keep only (epoch, chosen_grad) and clean Nans
                 d = df[["epoch", gcol]].copy()
+                d = d.dropna(subset=["epoch", gcol])
+                if d.empty:
+                    continue
                 d.rename(columns={gcol: "grad"}, inplace=True)
                 d = d.sort_values("epoch")
                 # optional rolling smoothing
                 if rolling and rolling > 1:
                     d["grad"] = d["grad"].rolling(rolling, min_periods=1).mean()
+
+                # drop any NaNs introduced at head
+                d = d.dropna(subset=["grad"])
+                if d.empty:
+                    continue
                 out.append(d)
         return out
 
@@ -1253,6 +1262,7 @@ def plot_gradient_dynamics(
         squeeze=False,
     )
     axes = axes.ravel()
+    any_plotted = False  # track if anything was actually plotted
 
     for idx, facet in enumerate(facets):
         ax = axes[idx]
@@ -1260,6 +1270,8 @@ def plot_gradient_dynamics(
             f"{facet_by} = {facet}   •   gradient = L2 norm (mean over params)",
             fontsize=fs["title"],
         )
+
+        panel_plotted = False
 
         for color_label in color_values:
             h, it = (
@@ -1272,6 +1284,9 @@ def plot_gradient_dynamics(
 
             run_dfs = _runs_grad_for_pair(h, it)
             if not run_dfs:
+                print(
+                    f"[INFO] No grad data for (hidden_init={h}, input_type={it}); skipping."
+                )
                 continue
 
             # individual runs
@@ -1284,10 +1299,12 @@ def plot_gradient_dynamics(
                         alpha=alpha_runs,
                         color=color_map[color_label],
                     )
+                    panel_plotted = True
+                    any_plotted = True
 
             # aggregate band
             agg = _mean_std_grad_by_epoch(run_dfs)
-            if not agg.empty and show_mean_band:
+            if not agg.empty:
                 ax.plot(
                     agg["epoch"].values,
                     agg["mean"].values,
@@ -1295,26 +1312,36 @@ def plot_gradient_dynamics(
                     color=color_map[color_label],
                     label=str(color_label),
                 )
-                ax.fill_between(
-                    agg["epoch"].values,
-                    agg["mean"].values - agg["std"].values,
-                    agg["mean"].values + agg["std"].values,
-                    alpha=alpha_band,
-                    color=color_map[color_label],
-                )
-            elif not agg.empty:
-                ax.plot(
-                    agg["epoch"].values,
-                    agg["mean"].values,
-                    lw=lw_mean,
-                    color=color_map[color_label],
-                    label=str(color_label),
-                )
+
+                if show_mean_band:
+                    ax.fill_between(
+                        agg["epoch"].values,
+                        agg["mean"].values - agg["std"].values,
+                        agg["mean"].values + agg["std"].values,
+                        alpha=alpha_band,
+                        color=color_map[color_label],
+                    )
+                panel_plotted = True
+                any_plotted = True
 
         ax.set_xlabel("Epoch", fontsize=fs["label"])
         ax.set_ylabel("Gradient L2 (per-epoch mean over params)", fontsize=fs["label"])
         ax.tick_params(axis="both", labelsize=fs["ticks"])
         ax.grid(True, linestyle=":", alpha=0.5)
+
+        if not panel_plotted:
+            ax.text(
+                0.5,
+                0.5,
+                "No gradient data",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=fs["ticks"],
+                alpha=0.7,
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
 
     # remove any unused axes
     for j in range(len(facets), len(axes)):
@@ -1340,6 +1367,104 @@ def plot_gradient_dynamics(
         )
 
     fig.suptitle(title or "Gradient dynamics over training", fontsize=fs["title"])
+    plt.tight_layout()
+    plt.show()
+
+    if not any_plotted:
+        print(
+            "[INFO] No gradient data to plot after cleaning; check RecordEp/sample_batch_idx and aggregator outputs."
+        )
+
+
+def plot_lambda_dynamics(
+    ts_bucket_path: Path,
+    input_types=None,
+    hidden_inits=None,
+    facet_by="input_type",
+    ncols=2,
+    figsize_each=(9, 5),
+    font_scale=1.6,
+):
+    """
+    Plot lambda (symmetric vs antisymmetric weight) over training.
+    """
+    ts_bucket = _load_ts_bucket(ts_bucket_path)
+    fs = _get_fontsizes(font_scale)
+
+    all_inits = sorted({h for (h, it) in ts_bucket.keys()})
+    all_inputs = sorted({it for (h, it) in ts_bucket.keys()})
+
+    use_inputs = [
+        it for it in (_to_list(input_types) or all_inputs) if it in all_inputs
+    ]
+    use_inits = [h for h in (_to_list(hidden_inits) or all_inits) if h in all_inits]
+
+    facets = use_inputs if facet_by == "input_type" else use_inits
+    color_dim = "hidden_init" if facet_by == "input_type" else "input_type"
+    color_values = use_inits if facet_by == "input_type" else use_inputs
+
+    import seaborn as sns
+
+    palette = sns.color_palette(n_colors=len(color_values))
+    color_map = {lab: palette[i] for i, lab in enumerate(color_values)}
+
+    n = len(facets)
+    ncols_eff = max(1, ncols)
+    nrows = int(np.ceil(n / ncols_eff))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols_eff,
+        figsize=(figsize_each[0] * ncols_eff, figsize_each[1] * nrows),
+        squeeze=False,
+    )
+    axes = axes.ravel()
+
+    for idx, facet in enumerate(facets):
+        ax = axes[idx]
+        ax.set_title(
+            f"{facet_by} = {facet} • λ (sym/antisym mix)", fontsize=fs["title"]
+        )
+
+        for color_label in color_values:
+            h, it = (
+                (color_label, facet)
+                if facet_by == "input_type"
+                else (facet, color_label)
+            )
+            entry = ts_bucket.get((h, it), {})
+            dfs = entry.get("metrics_df_list", [])
+            for df in dfs:
+                if "lambda" not in df.columns:
+                    continue
+                ax.plot(
+                    df["epoch"],
+                    df["lambda"],
+                    lw=2,
+                    alpha=0.8,
+                    color=color_map[color_label],
+                    label=color_label,
+                )
+
+        ax.set_xlabel("Epoch", fontsize=fs["label"])
+        ax.set_ylabel("λ", fontsize=fs["label"])
+        ax.tick_params(axis="both", labelsize=fs["ticks"])
+        ax.grid(True, linestyle=":", alpha=0.5)
+
+    # collapse legend
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            title=color_dim,
+            fontsize=fs["legend"],
+            title_fontsize=fs["legend"],
+            loc="upper center",
+            ncol=min(4, len(color_values)),
+            bbox_to_anchor=(0.5, 1.02),
+        )
+
+    fig.suptitle("Lambda dynamics", fontsize=fs["title"])
     plt.tight_layout()
     plt.show()
 

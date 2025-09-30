@@ -332,3 +332,59 @@ def open_loop_gain_match_and_plots(
         )
 
     return W_scaled, info
+
+
+def add_gaussian_noise_np(
+    W: np.ndarray,
+    noise_std: float,
+    seed: Optional[int] = None,
+    mode: str = "all",  # "all" | "offdiag" | "support_only"
+    scale_by_sqrtN: bool = True,  # scale noise by 1/sqrt(H)
+) -> Tuple[np.ndarray, Dict]:
+    """
+    Add small i.i.d. Gaussian noise to W.
+
+    Effective noise added is: noise_std * N(0,1) / sqrt(H) if scale_by_sqrtN=True.
+
+    Args
+    ----
+    W : (H,H) np.ndarray
+    noise_std : float
+        Amplitude multiplier for the Gaussian noise.
+    seed : Optional[int]
+    mode : str
+        "all"          -> add noise to all entries
+        "offdiag"      -> no noise on diagonal
+        "support_only" -> add noise only where |W|>0 (preserve sparsity pattern)
+    scale_by_sqrtN : bool
+        If True, divide the raw noise by sqrt(H).
+
+    Returns
+    -------
+    W_noisy : (H,H) np.ndarray
+    info : dict with summary of added noise
+    """
+    rng = np.random.default_rng(seed)
+    H = W.shape[0]
+    noise = rng.normal(size=W.shape).astype(np.float32)
+
+    if scale_by_sqrtN and H > 0:
+        noise = noise / np.sqrt(H)
+
+    if mode == "offdiag":
+        np.fill_diagonal(noise, 0.0)
+    elif mode == "support_only":
+        mask = (np.abs(W) > 0).astype(np.float32)
+        noise = noise * mask
+
+    W_noisy = W.astype(np.float32) + float(noise_std) * noise
+
+    info = {
+        "mode": mode,
+        "noise_std": float(noise_std),
+        "effective_entry_std": float(noise_std / np.sqrt(H))
+        if scale_by_sqrtN and H > 0
+        else float(noise_std),
+        "scale_by_sqrtN": bool(scale_by_sqrtN),
+    }
+    return W_noisy, info

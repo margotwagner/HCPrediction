@@ -233,7 +233,7 @@ def main():
         net.tanh = nn.ReLU()
         print("RNN nonlinearity: elementwise relu", file=f)
     else:
-        print("RNN nonlinear: elementwise tanh")
+        print("RNN nonlinearity: elementwise tanh", file=f)
 
     if args.fixi:
         for name, p in net.named_parameters():
@@ -909,7 +909,7 @@ def _resolve_hidden_init_path(args) -> str:
     }[norm]
     folder = norm if norm != "none" else "raw"
 
-    root = "data/Ns100_SeqN100/hidden-weight-initialization"
+    root = "data/Ns100_SeqN100/hidden-weight-inits"
     fname = f"{args.whh_type}_n{args.hidden_n}_{short}.npy"
     path = os.path.join(root, args.whh_type, folder, fname)
 

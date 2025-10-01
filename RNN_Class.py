@@ -117,7 +117,7 @@ class SymAsymRNN(nn.Module):
     """
 
     def __init__(self, input_dim, hidden_dim, output_dim):
-        super(SymAsymRNN).__init__()
+        super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
@@ -149,7 +149,7 @@ class SymAsymRNN(nn.Module):
     def forward(self, x, h0):
         W = self.effective_W()
         T = x.size(1)
-        h = h0
+        h = h0[0] if h0.ndim == 3 else h0
         outputs, hiddens = [], []
 
         for t in range(T):

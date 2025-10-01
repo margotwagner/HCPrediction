@@ -142,12 +142,41 @@ parser.add_argument(
 parser.add_argument(
     "--run_tag", type=str, default="", help="Optional run tag for bookkeeping"
 )
+parser.add_argument(
+    "--whh_type",
+    default="baseline",
+    choices=[
+        "baseline",
+        "centcycmh",
+        "centcyctridiag",
+        "centmh",
+        "centtridiag",
+        "cycshift",
+        "identity",
+        "shift",
+        "shiftcycmh",
+        "shiftcyctridiag",
+        "shiftmh",
+        "shifttridiag",
+    ],
+    help="Hidden-weight init type (default: baseline)",
+)
+parser.add_argument(
+    "--whh_norm",
+    default="none",
+    choices=["frobenius", "spectral", "variance", "none"],
+    help="Normalization strategy for hidden weight (ignored for baseline).",
+)
 
 
 def main():
     global args
 
     args = parser.parse_args()
+    args.hidden_init = _resolve_hidden_init_path(args)
+    print(
+        f"[whh] type={args.whh_type} norm={args.whh_norm} -> {args.hidden_init}", file=f
+    )
     lr = args.lr
     n_epochs = args.epochs
     RecordEp = args.print_freq
@@ -197,7 +226,7 @@ def main():
         print("output nonlinearity: elementwise sigmoid", file=f)
     elif args.act == "tanh":
         net.act = nn.Tanh()
-        print("output nonlinearity: elementwise sigmoid", file=f)
+        print("output nonlinearity: elementwise tanh", file=f)
 
     if args.rnn_act == "sigmoid":
         net.tanh = nn.Sigmoid()
@@ -205,6 +234,8 @@ def main():
     elif args.rnn_act == "relu":
         net.tanh = nn.ReLU()
         print("RNN nonlinearity: elementwise relu", file=f)
+    else:
+        print("RNN nonlinear: elementwise tanh")
 
     if args.fixi:
         for name, p in net.named_parameters():
@@ -404,7 +435,9 @@ def train_minibatch(
             use_clip = None
 
     # save initial hidden weights for "drift from init" measurement
-    if "pytorch" in args.net:
+    if isinstance(net, SymAsymRNN):
+        init_hidden = net.effective_W().detach().cpu().clone()
+    elif "pytorch" in args.net:
         init_hidden = net.rnn.weight_hh_l0.detach().cpu().clone()
     else:
         init_hidden = net.hidden_linear.weight.detach().cpu().clone()
@@ -521,7 +554,9 @@ def train_minibatch(
                     history["grad_norm"].append(grad_norm_for_record)
 
                 # hidden weight analysis
-                if "pytorch" in args.net:
+                if isinstance(net, SymAsymRNN):
+                    Wh = net.effective_W().detach().cpu()
+                elif "pytorch" in args.net:
                     Wh = net.rnn.weight_hh_l0.detach().cpu()
                 else:
                     Wh = net.hidden_linear.weight.detach().cpu()
@@ -847,6 +882,41 @@ def env_report():
         "gpu_name": torch.cuda.get_device_name() if torch.cuda.is_available() else None,
     }
     return info
+
+
+def _resolve_hidden_init_path(args) -> str:
+    # 1) explicit path wins (back-compat)
+    if args.hidden_init:
+        return args.hidden_init
+
+    # 2) baseline special-case
+    if args.whh_type == "baseline":
+        candidates = [
+            "/data/Ns100_SeqN100/hidden-weight-inits/baseline/random_baseline.npy",  # absolute
+            "data/Ns100_SeqN100/hidden-weight-inits/baseline/random_baseline.npy",  # relative
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                return p
+        raise FileNotFoundError("Baseline file not found at any expected location.")
+
+    # 3) constructed path for non-baseline
+    norm = (args.whh_norm or "none").lower()
+    short = {
+        "frobenius": "fro",
+        "spectral": "spec_gain0p90",
+        "variance": "var",
+        "none": "raw",
+    }[norm]
+    folder = norm if norm != "none" else "raw"
+
+    root = "data/Ns100_SeqN100/hidden-weight-initialization"
+    fname = f"{args.whh_type}_n{args.hidden_n}_{short}.npy"
+    path = os.path.join(root, args.whh_type, folder, fname)
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Hidden-weight init not found: {path}")
+    return path
 
 
 if __name__ == "__main__":

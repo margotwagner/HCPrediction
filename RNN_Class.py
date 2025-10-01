@@ -113,7 +113,7 @@ class ElmanRNN_pytorch_module_v2(nn.Module):
 
 class SymAsymRNN(nn.Module):
     """
-    Modification of ElmanRNN_pytorch_module_v2 where hidden-to-hidden weights are constrained as W = λ * S + (1 - λ) * A, with λ trainable in [0, 1]. S = Symmetric component, A = antisymmetric component
+    Modification of ElmanRNN_pytorch_module_v2 where hidden-to-hidden weights are constrained as W = λ * S + (1 - λ) * A, with λ constrained to [0, 1]. S = Symmetric component, A = antisymmetric component
     """
 
     def __init__(self, input_dim, hidden_dim, output_dim):
@@ -128,8 +128,8 @@ class SymAsymRNN(nn.Module):
         nn.init.orthogonal_(self.S)
         nn.init.orthogonal_(self.A)
 
-        # trainable mixing weight
-        self.lmbda = nn.Parameter(torch.tensor(0.5))
+        # unconstrained raw param
+        self.lambda_raw = nn.Parameter(torch.tensor(0))  # sigmoid(0) = 0.5
 
         # input/output modules
         self.input_linear = nn.Linear(input_dim, hidden_dim)
@@ -140,11 +140,16 @@ class SymAsymRNN(nn.Module):
         self.act = nn.Softmax(2)  # output nonlinearity (overridden in Main_s4.py)
         self.tanh = torch.tanh  # recurrent nonlinearity (overridable in Main_s4.py)
 
+    def effective_lambda(self):
+        # bounds λ to [0, 1]
+        return torch.sigmoid(self.lambda_raw)  # in (0,1)
+
     def effective_W(self):
         # λS + (1-λ)A, force symmetry/antisymmetry structure
         S_sym = 0.5 * (self.S + self.S.T)
         A_asym = 0.5 * (self.A - self.A.T)
-        return self.lmbda * S_sym + (1 - self.lmbda) * A_asym
+        lam = self.effective_lambda()
+        return lam * S_sym + (1.0 - lam) * A_asym
 
     def forward(self, x, h0):
         W = self.effective_W()

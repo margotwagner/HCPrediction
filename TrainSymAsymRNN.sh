@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export WHH_TYPE="shiftcycmh"        # or baseline, cycshift, ...
+export WHH_TYPE="identity"        # or baseline, cycshift, ...
 export WHH_NORM="frobenius"     # frobenius|spectral|variance|none
 export INPUT="asym1"           # suffix in your file name (e.g., 1, asym1, etc.)
 
+# For baseline we still write a 'none' norm folder so paths are uniform
+NORM_DIR="${WHH_NORM}"
+if [[ "${WHH_TYPE}" == "baseline" ]]; then
+  NORM_DIR="none"
+fi
+
+# New base includes <whh_type>/<whh_norm>/<input>
+BASE="SymAsymRNN/N100T100/${WHH_TYPE}/${NORM_DIR}/${INPUT}"
+
+echo "[plan] saving runs under: ${BASE}/multiruns/run_XX/"
+echo "[plan] encoding file: data/Ns100_SeqN100/encodings/Ns100_SeqN100_${INPUT}.pth.tar"
+
 for i in $(printf "%02d\n" {0..9}); do
-  # build run dir (omit norm for baseline)
-  BASE="SymAsymRNN/N100T100/${WHH_TYPE}"
-  if [[ "${WHH_TYPE}" != "baseline" ]]; then
-    BASE="${BASE}/${WHH_NORM}"
-  fi
   RUN_DIR="${BASE}/multiruns/run_${i}"
-  mkdir -p "${RUN_DIR}/hidden-weights"
+  HW_DIR="${RUN_DIR}/hidden-weights"     # keep plural; it’s what Main_s4.py writes
+  mkdir -p "${HW_DIR}"
 
   nohup python Main_s4.py \
     --input "data/Ns100_SeqN100/encodings/Ns100_SeqN100_${INPUT}.pth.tar" \
@@ -20,9 +28,9 @@ for i in $(printf "%02d\n" {0..9}); do
     --batch-size 1 \
     --pred 1 --fixi 1 --hidden-n 100 \
     --seed "${i}" \
-    --epochs 10000 \
+    --epochs 20000 \
     --whh_type "${WHH_TYPE}" --whh_norm "${WHH_NORM}" \
-    --output_dir "${RUN_DIR}/hidden-weights" \
+    --output_dir "${HW_DIR}" \
     --savename  "${RUN_DIR}/Ns100_SeqN100_predloss_full" \
     > "${RUN_DIR}/train.out" 2>&1
 done

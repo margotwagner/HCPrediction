@@ -190,6 +190,13 @@ def main():
     global args
 
     args = parser.parse_args()
+    # ensure your save paths include .../<whh_type>/<whh_norm|none>/<input>/...
+    input_suffix = _input_suffix_from_path(args.input)
+    args = _ensure_input_in_output_paths(args, input_suffix)
+
+    # build the correct init path from flags
+    args.hidden_init = _resolve_hidden_init_path(args)
+    print(f"[whh] type={args.whh_type} norm={args.whh_norm} -> {args.hidden_init}")
     lr = args.lr
     n_epochs = args.epochs
     RecordEp = args.print_freq
@@ -1114,6 +1121,98 @@ def evaluate_onestep(X_mini, Target_mini, h_t, net, criterion):
         output_seq[:, t : t + 1, :] = o_t.cpu().detach().numpy()
         h_seq[:, t : t + 1, :] = h_t.cpu().detach().numpy().transpose((1, 0, 2))
     return output_seq, h_seq
+
+
+import re
+
+
+def _input_suffix_from_path(p: str) -> str:
+    """
+    Extract <INPUT> from .../Ns100_SeqN100_<INPUT>.pth.tar
+    Returns 'unknown' if not found.
+    """
+    if not p:
+        return "unknown"
+    m = re.search(r"Ns100_SeqN100_(.+?)\.pth\.tar$", p)
+    return m.group(1) if m else "unknown"
+
+
+def _ensure_input_in_output_paths(args, input_suffix: str):
+    """
+    If the caller forgot to include <input> in --output_dir / --savename path,
+    append it to keep the on-disk layout consistent.
+    (Your launcher already passes the full path; this is just guardrails.)
+    """
+    # only patch when running under SymAsymRNN/N100T100 tree to avoid surprises
+    # and only if suffix is meaningful
+    if input_suffix in ("", "unknown"):
+        return args
+
+    def _needs_suffix(p: str) -> bool:
+        return (
+            bool(p)
+            and (f"/{input_suffix}/" not in p)
+            and (not p.endswith(f"/{input_suffix}"))
+        )
+
+    # Add <input> to parent containers one level up from leaf
+    if _needs_suffix(args.output_dir):
+        args.output_dir = os.path.join(args.output_dir, input_suffix)
+        os.makedirs(args.output_dir, exist_ok=True)
+
+    # For savename, insert <input> just before the file leaf if missing
+    if _needs_suffix(args.savename):
+        base_dir = os.path.dirname(args.savename)
+        leaf = os.path.basename(args.savename)
+        args.savename = os.path.join(base_dir, input_suffix, leaf)
+        os.makedirs(os.path.dirname(args.savename), exist_ok=True)
+
+    return args
+
+
+def _resolve_hidden_init_path(args) -> str:
+    """
+    Build the on-disk path to the (H,H) .npy hidden-weight initialization
+    from your flags. Matches YOUR stated layout exactly:
+
+    - Baseline:
+      data/Ns100_SeqN100/hidden-weight-inits/baseline/random_baseline.npy
+
+    - Non-baseline:
+      data/Ns100_SeqN100/hidden-weight-inits/<whh_type>/<whh_norm>/<whh_type>_n<hidden_n>_<short>.npy
+
+      where shortnames are:
+        frobenius -> fro
+        spectral  -> spec
+        variance  -> var
+        none      -> raw
+    """
+    # 1) explicit path wins (back-compat)
+    if args.hidden_init:
+        return args.hidden_init
+
+    root = "data/Ns100_SeqN100/hidden-weight-inits"
+
+    # 2) baseline special-case
+    if args.whh_type == "baseline":
+        cand = os.path.join(root, "baseline", "random_baseline.npy")
+        if os.path.exists(cand):
+            return cand
+        raise FileNotFoundError(f"Baseline init not found: {cand}")
+
+    # 3) constructed path for non-baseline
+    norm = (
+        args.whh_norm or "none"
+    ).lower()  # folder name: frobenius|spectral|variance|none
+    short = {"frobenius": "fro", "spectral": "spec", "variance": "var", "none": "raw"}[
+        norm
+    ]
+
+    fname = f"{args.whh_type}_n{int(args.hidden_n)}_{short}.npy"
+    path = os.path.join(root, args.whh_type, norm, fname)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Hidden-weight init not found: {path}")
+    return path
 
 
 if __name__ == "__main__":

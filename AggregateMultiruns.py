@@ -8,32 +8,26 @@ import numpy as np
 import torch
 import pandas as pd
 import pickle
+import json, re, os
 
 # -------------------
 # CONFIG
 # -------------------
 DATA_DIR = Path("./data/Ns100_SeqN100/")
-MODEL_ROOT = Path("./Elman_SGD/Remap_predloss/N100T100/")
+MODEL_ROOT = Path("./SymAsymRNN/N100T100/")
+CSV_ROOT = MODEL_ROOT / "csv"
+CSV_ROOT.mkdir(parents=True, exist_ok=True)
 
-HIDDEN_WEIGHT_INITS = [
-    "he",
-    "cyclic-shift",
-    "shift",
-    "cmh",
-    "mh",
-    "ctridiag",
-    "tridiag",
-    "orthog",
-]
-INPUT_TYPES = ["gaussian", "onehot", "khot", "small-gaussian"]
+# whh_type (hidden weight type)
+HIDDEN_WEIGHT_INITS = ["baseline", "cycshift", "shiftcycmh"]  # add more as needed
+
+# whh_norm (norms used in training)
+INPUT_TYPES = ["none", "frobenius", "spectral", "variance"]
 
 MULTIRUNS_DIR = "multiruns"
 RUN_PREFIX = "run_"
 MODEL_FNAME = "Ns100_SeqN100_predloss_full.pth.tar"
 HIDDEN_WEIGHTS_SUBDIR = "hidden-weights"
-
-# Output dir for CSVs
-CSV_ROOT = MODEL_ROOT / "RESULTS-10RUNS-09102025"
 
 
 # -------------------
@@ -48,6 +42,43 @@ def _load_torch(p):
     except Exception as e:
         print(f"[WARN] Could not load {p}: {e}")
         return None
+
+
+import json, re, os
+
+
+def _infer_input_type_from_meta(ckpt_path: Path) -> str:
+    """Parses meta['args']['input'] to get the <INPUT> suffix."""
+    meta_path = ckpt_path.with_suffix("").with_suffix(".meta.json")
+    try:
+        meta = json.loads(meta_path.read_text())
+        inp = meta.get("args", {}).get("input", "") or ""
+        m = re.search(r"Ns100_SeqN100_(.+?)\.pth\.tar$", inp)
+        return m.group(1) if m else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _iter_run_dirs_for_type(whh_type: str):
+    """
+    Yields (whh_norm, run_dir, ckpt_path, hw_dir) across baseline and norm subfolders.
+    Baseline has no norm directory; non-baseline have /<norm>.
+    """
+    base = MODEL_ROOT / whh_type
+    candidates = [base] if whh_type == "baseline" else [base / n for n in WHH_NORMS]
+    for root in candidates:
+        if not root.exists():
+            continue
+        multiruns = root / MULTIRUNS_DIR
+        if not multiruns.exists():
+            continue
+        for d in sorted(multiruns.glob(f"{RUN_PREFIX}*")):
+            ckpt = d / MODEL_FNAME
+            if not ckpt.exists():
+                continue
+            hw_dir = HIDDEN_WEIGHTS_SUBDIR
+            whh_norm = "none" if whh_type == "baseline" else root.name
+            yield whh_norm, d, ckpt, hw_dir
 
 
 def _extract_loss_series(ckpt) -> Optional[List[float]]:
@@ -351,164 +382,109 @@ def _save_df_csv(df: pd.DataFrame, path: Path) -> None:
 # -------------------
 # Collection for one (hidden_init, input_type)
 # -------------------
-def collect_for_setting(hidden_init: str, input_type: str):
-    base = MODEL_ROOT / hidden_init / input_type
-    per_run_rows, losses_all = [], []
-    metrics_df_list, grad_df_list, history_df_list = [], [], []
+def collect_for_setting(hidden_init: str, _unused_input_type: str = None):
+    """
+    Collect runs for a hidden_init (whh_type) across all its norm folders.
+    Input type is inferred per-run from .meta.json.
+    """
+    rows = []
+    ts = {
+        "loss_series": [],
+        "metrics_df_list": [],
+        "grad_df_list": [],
+        "run_ids": [],
+        "whh_norms": [],
+        "input_types": [],
+        "hw_dirs": [],
+    }
 
-    for run_id, p in _iter_multirun_files(base):
-        print(f"Run {run_id}: {p}")
-        ckpt = _load_torch(p)
+    for whh_norm, run_dir, ckpt_path, hw_dir in _iter_run_dirs_for_type(hidden_init):
+        run_id = run_dir.name.replace(RUN_PREFIX, "", 1)
+        ckpt = _load_torch(ckpt_path)
+        if ckpt is None:
+            continue
 
-        # --- losses ---
+        input_type = _infer_input_type_from_meta(ckpt_path)
+
+        # --- extract what you already had ---
         loss_series = _extract_loss_series(ckpt)
-        if loss_series:
-            losses_all.append(loss_series)
-        m = _metrics_from_loss(loss_series)
+        m_basic = _metrics_from_loss(loss_series)
 
-        # --- metrics timeseries ---
         mlist = _extract_metrics_list(ckpt)
-        metrics_df = None
-        if mlist:
-            metrics_df = _metrics_df_from_list(mlist, run_id)
-            metrics_df_list.append(metrics_df)
+        metrics_df = _metrics_df_from_list(mlist, run_id) if mlist else None
         metrics_summary = _summarize_metrics(metrics_df, loss_series)
 
-        # --- (prepare per-run row but DON'T append yet) ---
-        row = None
-        if m:
-            row = {
+        grad_rows = _extract_grad_list(ckpt)
+        grad_df = _reduce_grad_snapshot_paramwise(grad_rows)
+        grad_df = _attach_epoch_to_list(grad_rows, grad_df, ckpt)
+
+        rows.append(
+            {
                 "hidden_init": hidden_init,
+                "whh_norm": whh_norm,
                 "input_type": input_type,
                 "run_kind": "multirun",
                 "run_id": run_id,
-                "path": str(p),
-                **m,
-                **metrics_summary,
+                "path": str(ckpt_path),
+                **(m_basic or {}),
+                **(metrics_summary or {}),
             }
-            # capture lambda if SymAsymRNN saved it
-            if metrics_df is not None and "lambda" in metrics_df.columns:
-                row["lambda_final"] = float(metrics_df["lambda"].iloc[-1])
-
-        # --- gradients timeseries ---
-        glist = _extract_grad_list(ckpt)
-        if not glist:
-            print(
-                f"[WARN] No gradient snapshots in {p.name} (run {run_id}). "
-                "Check RecordEp/sample_batch_idx in training."
-            )
-            has_grads, n_grad_snaps, gdf = False, 0, None
-        else:
-            reduced_rows = [_reduce_grad_snapshot_paramwise(s) for s in glist]
-            gdf = _attach_epoch_to_list(reduced_rows, ckpt)
-            has_grads = gdf is not None and not gdf.empty
-            n_grad_snaps = 0 if gdf is None else len(gdf)
-            if not has_grads:
-                print(
-                    f"[WARN] Gradient DataFrame empty after attach for run {run_id} "
-                    "(epoch alignment issue?)."
-                )
-
-        if has_grads:
-            gdf["run_id"] = run_id
-            grad_df_list.append(gdf)
-
-        # --- history timeseries ---
-        history = _extract_history(
-            ckpt, keep=("epoch", "loss", "grad_norm"), summarize=False
         )
-        if history:
-            hist_df = pd.DataFrame(history)
-            hist_df["run_id"] = run_id
-            history_df_list.append(hist_df)
 
-        # --- add grad health fields into the row, then append ---
-        if row is not None:
-            row["has_grads"] = bool(has_grads)
-            row["n_grad_snaps"] = int(n_grad_snaps)
-            if has_grads:
-                row["first_grad_epoch"] = int(gdf["epoch"].min())
-                row["last_grad_epoch"] = int(gdf["epoch"].max())
-            else:
-                row["first_grad_epoch"] = None
-                row["last_grad_epoch"] = None
-            per_run_rows.append(row)
+        if loss_series:
+            ts["loss_series"].append(loss_series)
+        if metrics_df is not None:
+            ts["metrics_df_list"].append(metrics_df)
+        if grad_df is not None:
+            ts["grad_df_list"].append(grad_df)
+        ts["run_ids"].append(run_id)
+        ts["whh_norms"].append(whh_norm)
+        ts["input_types"].append(input_type)
+        ts["hw_dirs"].append(str(hw_dir) if hw_dir else "")
 
-    return per_run_rows, {
-        "losses": losses_all,
-        "metrics_df_list": metrics_df_list,
-        "grad_df_list": grad_df_list,
-        "history_df_list": history_df_list,
-    }
+    return rows, ts
 
 
 # -------------------
 # High-level collection across all settings
 # -------------------
-def collect_all(h_inits=None, in_types=None):
+def collect_all(h_inits=None):
     h_inits = h_inits or HIDDEN_WEIGHT_INITS
-    in_types = in_types or INPUT_TYPES
+    all_rows, ts_bucket = [], {}
 
-    all_rows = []
-    ts_bucket = {}  # (hidden_init, input_type) -> per-run timeseries dict
-
-    # Get per_run_row, losses, metrics, and gradients for each (hidden_init, input_type) setting
     for h in h_inits:
-        for it in in_types:
-            print(f"Collecting for (hidden_init={h}, input_type={it})")
-            rows, ts = collect_for_setting(h, it)
-            if rows:
-                all_rows.extend(rows)
-            ts_bucket[(h, it)] = ts
-    per_run_df = (
-        pd.DataFrame(all_rows)
-        if all_rows
-        else pd.DataFrame(
-            columns=[
-                "hidden_init",
-                "input_type",
-                "run_kind",
-                "run_id",
-                "path",
-                "final_loss",
-                "best_loss",
-                "best_epoch",
-                "loss_auc",
-                "time_to_110pct_best",
-            ]
-        )
-    )
+        rows, ts_all = collect_for_setting(h)
+        all_rows.extend(rows)
 
-    # Aggregate over multiruns (per setting)
-    agg_rows = []
+        # split ts by input_type to preserve (hidden_init, input_type) API
+        if ts_all.get("input_types"):
+            for it in sorted(set(ts_all["input_types"])):
+                mask = [t == it for t in ts_all["input_types"]]
+                ts_bucket[(h, it)] = {
+                    k: [v for v, m in zip(ts_all[k], mask) if m]
+                    for k in [
+                        "loss_series",
+                        "metrics_df_list",
+                        "grad_df_list",
+                        "run_ids",
+                        "whh_norms",
+                        "input_types",
+                        "hw_dirs",
+                    ]
+                }
+        else:
+            ts_bucket[(h, "unknown")] = ts_all
+
+    per_run_df = pd.DataFrame(all_rows)
+    agg_df = _aggregate_per_run(per_run_df) if not per_run_df.empty else pd.DataFrame()
+
     if not per_run_df.empty:
-        # identify all per-run scalar columns to aggregate by (exlude ids)
-        exclude = {"hidden_init", "input_type", "run_kind", "run_id", "path"}
-        scalar_cols = [
-            c
-            for c in per_run_df.columns
-            if c not in exclude and pd.api.types.is_numeric_dtype(per_run_df[c])
-        ]
+        _save_df_csv(per_run_df, CSV_ROOT / "per_run_metrics.csv")
+    if not agg_df.empty:
+        _save_df_csv(agg_df, CSV_ROOT / "agg_metrics.csv")
+    with open(CSV_ROOT / "ts_bucket.pkl", "wb") as f:
+        pickle.dump(ts_bucket, f)
 
-        for (h, it), group in per_run_df.groupby(["hidden_init", "input_type"]):
-            g_multi = group[group["run_kind"] == "multirun"]
-            row = {
-                "hidden_init": h,
-                "input_type": it,
-                "num_runs": int(g_multi.shape[0]),
-            }
-            if g_multi.empty:
-                for c in scalar_cols:
-                    row[f"{c}_mean"] = np.nan
-                    row[f"{c}_std"] = np.nan
-            else:
-                for c in scalar_cols:
-                    row[f"{c}_mean"] = float(g_multi[c].mean())
-                    row[f"{c}_std"] = (
-                        float(g_multi[c].std(ddof=1)) if g_multi.shape[0] > 1 else 0.0
-                    )
-            agg_rows.append(row)
-    agg_df = pd.DataFrame(agg_rows)
     return per_run_df, agg_df, ts_bucket
 
 

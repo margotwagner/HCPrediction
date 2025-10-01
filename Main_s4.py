@@ -174,9 +174,7 @@ def main():
 
     args = parser.parse_args()
     args.hidden_init = _resolve_hidden_init_path(args)
-    print(
-        f"[whh] type={args.whh_type} norm={args.whh_norm} -> {args.hidden_init}", file=f
-    )
+    print(f"[whh] type={args.whh_type} norm={args.whh_norm} -> {args.hidden_init}")
     lr = args.lr
     n_epochs = args.epochs
     RecordEp = args.print_freq
@@ -561,14 +559,15 @@ def train_minibatch(
                 else:
                     Wh = net.hidden_linear.weight.detach().cpu()
 
-                drift = _frob(Wh - init_hidden)
-                frob_norm = _frob(Wh)
-                rho = _spectral_radius(Wh)
-                orth_err = None
+                # COMMENTING OUT EXPENSIVE CALCULATIONS -- CAN DO OFFLINE
+                # drift = _frob(Wh - init_hidden)
+                # frob_norm = _frob(Wh)
+                # rho = _spectral_radius(Wh)
+                # orth_err = None
 
-                if Wh.shape[0] == Wh.shape[1]:
-                    I = torch.eye(Wh.shape[0])
-                    orth_err = _frob(Wh.T @ Wh - I)  # orthogonality error
+                # if Wh.shape[0] == Wh.shape[1]:
+                #    I = torch.eye(Wh.shape[0])
+                #    orth_err = _frob(Wh.T @ Wh - I)  # orthogonality error
 
                 # hidden activation stats on current minibatch
                 with torch.no_grad():
@@ -576,14 +575,14 @@ def train_minibatch(
                     act_mean = float(h_dbg.mean().item())
                     act_std = float(h_dbg.std().item())
                     tanh_sat = float((h_dbg.abs() > 0.99).float().mean().item())
-                    s, _, _ = torch.svd(Wh)
-                    s_max = float(s.max().item())
-                    s_min = float(s.min().item()) if s.numel() > 0 else float("nan")
-                    cond = float(s_max / (s_min + 1e-12))
+                    # s, _, _ = torch.svd(Wh)
+                    # s_max = float(s.max().item())
+                    # s_min = float(s.min().item()) if s.numel() > 0 else float("nan")
+                    # cond = float(s_max / (s_min + 1e-12))
 
                     # Hidden weight aggregates
-                    max_abs_w = float(Wh.abs().max().item())
-                    sparsity_w = float((Wh.abs() < 1e-8).float().mean().item())
+                    # max_abs_w = float(Wh.abs().max().item())
+                    # sparsity_w = float((Wh.abs() < 1e-8).float().mean().item())
 
                 # Batch-loss dispersion within this epoch
                 loss_mean = float(np.mean(batch_losses))
@@ -600,15 +599,15 @@ def train_minibatch(
                         "loss": epoch_loss,
                         "loss_batch_mean": loss_mean,
                         "loss_batch_std": loss_std,
-                        "frob": frob_norm,
-                        "drift_from_init": drift,
-                        "spectral_radius": rho,
-                        "spectral_norm": s_max,
-                        "min_singular": s_min,
-                        "cond_num": cond,
-                        "orth_err": orth_err,
-                        "w_max_abs": max_abs_w,
-                        "w_sparsity": sparsity_w,
+                        # "frob": frob_norm,
+                        # "drift_from_init": drift,
+                        # "spectral_radius": rho,
+                        # "spectral_norm": s_max,
+                        # "min_singular": s_min,
+                        # "cond_num": cond,
+                        # "orth_err": orth_err,
+                        # "w_max_abs": max_abs_w,
+                        # "w_sparsity": sparsity_w,
                         "act_mean": act_mean,
                         "act_std": act_std,
                         "tanh_sat": tanh_sat,

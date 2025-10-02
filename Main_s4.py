@@ -615,7 +615,7 @@ def train_minibatch(
                 )
 
                 if isinstance(net, SymAsymRNN):
-                    metrics[-1]["lambda"] = float(net.lmbda.detach().cpu())
+                    metrics[-1]["lambda"] = float(net.effective_lambda().detach().cpu())
                     torch.save(
                         net.S.detach().cpu(),
                         os.path.join(args.output_dir, f"S_epoch{epoch:06d}.pt"),

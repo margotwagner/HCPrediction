@@ -14,7 +14,7 @@ from typing import Optional, Tuple, Dict
 # CONFIG: set these 3 and run
 # ----------------------------
 WHH_TYPE = "baseline"  # e.g. baseline|cycshift|shiftcycmh|identity|...
-WHH_NORM = "none"  # frobenius|spectral|variance|none  (baseline uses 'none' folder per your script)
+WHH_NORM = "none"  # frobenius|spectral|variance|none  (baseline uses 'none' folder)
 INPUT = "asym1"  # matches <INPUT> in Ns100_SeqN100_<INPUT>.pth.tar
 
 ROOT = Path("SymAsymRNN") / "N100T100" / WHH_TYPE / WHH_NORM / INPUT / "multiruns"
@@ -115,6 +115,55 @@ def _safe(x, default=np.nan):
         return default
 
 
+def _spectral_summary(
+    W: np.ndarray, topk: int = 5, bulk_q: float = 0.95, eps: float = 1e-12
+):
+    """
+    Minimal spectral summary for 'bulk + outliers':
+      - radius_over_bulk: max|λ| / quantile_q(|λ|)
+      - var_topk:         fraction of |λ|^2 mass in top-k eigenvalues
+      - eff_dim:          participation ratio of |λ|^2 (effective dimension)
+    """
+    vals = np.linalg.eigvals(W)
+    mags = np.abs(vals)
+    if mags.size == 0:
+        return dict(
+            radius_over_bulk=np.nan,
+            var_topk=np.nan,
+            eff_dim=np.nan,
+        )
+
+    # radius vs bulk (95th percentile by default)
+    radius = float(mags.max())
+    bulk_r = float(np.quantile(mags, bulk_q))
+    radius_over_bulk = float(radius / (bulk_r + eps))
+
+    # power distribution over eigenvalues (use |λ|^2)
+    power = mags**2
+    total = float(power.sum())
+    if total <= 0:
+        return dict(
+            radius_over_bulk=radius_over_bulk,
+            var_topk=0.0,
+            eff_dim=0.0,
+        )
+
+    p = power / total  # probability-like weights over modes
+
+    # variance explained by top-k
+    order = np.argsort(p)[::-1]
+    var_topk = float(np.cumsum(p[order])[min(topk, len(p)) - 1])
+
+    # participation ratio (effective dimension)
+    eff_dim = float((p.sum() ** 2) / (np.sum(p**2) + eps))
+
+    return dict(
+        radius_over_bulk=radius_over_bulk,
+        var_topk=var_topk,
+        eff_dim=eff_dim,
+    )
+
+
 # ----------------------------
 # Aggregation (one condition)
 # ----------------------------
@@ -126,9 +175,14 @@ def aggregate_condition(root: Path):
       - checkpoint loss curve
       - recorded metrics (to grab lambda if present)
       - hidden-weight snapshots and recompute offline metrics
+      - gradient norms (total + per-group) aligned to recorded epochs
+
     Returns:
       per_run_df: one row per run with summary stats
       ts_df:      time-series rows aligned to recorded epochs (stacked over runs)
+                 Columns now include:
+                   - loss, lambda, [recomputed W metrics...]
+                   - grad_norm, grad_S, grad_A, grad_input_linear, grad_linear, grad_lambda_raw (if present)
     """
     rows = []
     ts_rows = []
@@ -161,6 +215,20 @@ def aggregate_condition(root: Path):
         ]
         lam_map = {int(ep): val for ep, val in lam_series if ep is not None}
 
+        # --- gradients (history + per_group) aligned by recorded epochs ---
+        history = ckpt.get("history", {}) or {}
+        hist_epochs = history.get("epoch", []) or []
+        hist_grad = history.get("grad_norm", []) or []
+        ep_to_grad = {int(e): _safe(g) for e, g in zip(hist_epochs, hist_grad)}
+
+        grad_list = ckpt.get("grad_list", []) or []
+        # map epoch -> per_group_norm dict, using history epoch order
+        ep_to_group = {}
+        for i, e in enumerate(hist_epochs):
+            if i < len(grad_list):
+                gentry = grad_list[i] or {}
+                ep_to_group[int(e)] = gentry.get("per_group_norm", {}) or {}
+
         # --- recompute metrics from saved Wh snapshots ---
         snaps = _snapshot_list(run_dir)
         if not snaps:
@@ -171,6 +239,19 @@ def aggregate_condition(root: Path):
             W = torch.load(Wp, map_location="cpu").cpu().numpy()
             met = _metrics_from_W(W)
             lam = lam_map.get(ep, np.nan)
+            spec = _spectral_summary(W)
+
+            # gradient fields (total + expected groups, NaN if missing)
+            g_total = ep_to_grad.get(ep, np.nan)
+            g_groups = ep_to_group.get(ep, {})
+
+            # normalize a few common group names
+            g_S = _safe(g_groups.get("S", np.nan))
+            g_A = _safe(g_groups.get("A", np.nan))
+            g_in = _safe(g_groups.get("input_linear", np.nan))
+            g_out = _safe(g_groups.get("linear", np.nan))
+            g_lam = _safe(g_groups.get("lambda_raw", np.nan))  # only if trainable
+
             ts_rows.append(
                 {
                     "run_id": run_id,
@@ -180,6 +261,13 @@ def aggregate_condition(root: Path):
                     else np.nan,
                     "lambda": lam,
                     **met,
+                    "grad_norm": g_total,
+                    "grad_S": g_S,
+                    "grad_A": g_A,
+                    "grad_input_linear": g_in,
+                    "grad_linear": g_out,
+                    "grad_lambda_raw": g_lam,
+                    **spec,
                 }
             )
 
@@ -187,6 +275,7 @@ def aggregate_condition(root: Path):
         last_ep, last_Wp, _, _ = snaps[-1]
         W_last = torch.load(last_Wp, map_location="cpu").cpu().numpy()
         met_last = _metrics_from_W(W_last)
+        spec_last = _spectral_summary(W_last)
 
         rows.append(
             {
@@ -196,6 +285,7 @@ def aggregate_condition(root: Path):
                 "loss_auc": auc_loss,
                 "last_epoch": int(last_ep),
                 **{f"last_{k}": v for k, v in met_last.items()},
+                **{f"last_{k}": v for k, v in spec_last.items()},
                 "base_path": str(run_dir),
             }
         )
@@ -210,61 +300,81 @@ def aggregate_condition(root: Path):
 # ----------------------------
 
 
-def plot_loss_mean_band(ts_df: pd.DataFrame, title="Loss (mean ± std)"):
-    g = ts_df.groupby("epoch")["loss"]
-    ep = g.mean().index.values
-    mu = g.mean().values
-    sd = g.std().values
-    plt.figure()
-    plt.plot(ep, mu, label="mean")
-    plt.fill_between(ep, mu - sd, mu + sd, alpha=0.2, label="±1 sd")
-    plt.xlabel("epoch")
-    plt.ylabel("loss")
-    plt.title(title)
-    plt.legend()
-    plt.tight_layout()
+def plot_loss_mean_band_condition(
+    label: str,
+    ts_df: pd.DataFrame,
+    title: str = "Loss (mean ± sd)",
+    fontsize: int = 12,
+    figsize: Tuple[float, float] = (6.0, 4.0),
+    fit: bool = True,
+    fit_range: Optional[Tuple[int, int]] = None,  # e.g., (0, 10000)
+    plot_fit: bool = True,
+    logy: bool = True,
+    eps: float = 1e-12,
+):
+    """
+    Single-condition convenience wrapper around overlay_loss.
+    Accepts the same knobs so your notebook calls feel consistent.
+    Returns the same fit-stats DataFrame that overlay_loss returns, but with one row.
+    """
+    condition_series = {label: ts_df}
+    return overlay_loss(
+        condition_series=condition_series,
+        title=title,
+        fontsize=fontsize,
+        figsize=figsize,
+        fit=fit,
+        fit_range=fit_range,
+        plot_fit=plot_fit,
+        logy=logy,
+        eps=eps,
+    )
 
 
-def plot_metric(ts_df: pd.DataFrame, key: str, title=None):
-    g = ts_df.groupby("epoch")[key]
-    ep = g.mean().index.values
-    mu = g.mean().values
-    sd = g.std().values
-    plt.figure()
-    plt.plot(ep, mu, label="mean")
-    plt.fill_between(ep, mu - sd, mu + sd, alpha=0.2, label="±1 sd")
-    plt.xlabel("epoch")
-    plt.ylabel(key)
-    plt.title(title or key)
-    plt.legend()
-    plt.tight_layout()
+def plot_metric_condition(
+    label: str,
+    ts_df: pd.DataFrame,
+    key: str,
+    title: Optional[str] = None,
+    fontsize: int = 12,
+    figsize: Tuple[float, float] = (6.0, 4.0),
+    logy: bool = False,
+    fit: bool = False,
+    fit_on_log: bool = True,
+    fit_range: Optional[Tuple[int, int]] = None,
+    plot_fit: bool = True,
+    eps: float = 1e-12,
+):
+    """
+    Single-condition convenience wrapper around overlay_metric.
+    Same interface as overlay_metric but for one (label, ts_df) pair.
+    Returns the fit-stats DataFrame (one row).
+    """
+    condition_series = {label: ts_df}
+    return overlay_metric(
+        condition_series=condition_series,
+        key=key,
+        title=title,
+        fontsize=fontsize,
+        figsize=figsize,
+        logy=logy,
+        fit=fit,
+        fit_on_log=fit_on_log,
+        fit_range=fit_range,
+        plot_fit=plot_fit,
+        eps=eps,
+    )
 
 
-def plot_eigs_last(root: Path, max_points_per_run=1000):
-    """Scatter eigenvalues of last snapshot for each run (downsample if large)."""
-    runs = _sorted_runs(root)
-    plt.figure()
-    for run_dir in runs:
-        snaps = _snapshot_list(run_dir)
-        if not snaps:
-            continue
-        _, Wp, _, _ = snaps[-1]
-        W = torch.load(Wp, map_location="cpu").cpu().numpy()
-        vals = _eigvals_np(W)
-        # optional downsample to avoid overplotting
-        if vals.size > max_points_per_run:
-            idx = np.random.choice(vals.size, max_points_per_run, replace=False)
-            vals = vals[idx]
-        plt.scatter(np.real(vals), np.imag(vals), s=4, alpha=0.5)
-    plt.axhline(0, lw=0.5, c="k")
-    plt.axvline(0, lw=0.5, c="k")
-    circle = plt.Circle((0, 0), 1.0, fill=False, linestyle="--", alpha=0.3)
-    plt.gca().add_artist(circle)
-    plt.gca().set_aspect("equal", adjustable="box")
-    plt.title("Eigenvalues (last snapshot, all runs)")
-    plt.xlabel("Re(λ)")
-    plt.ylabel("Im(λ)")
-    plt.tight_layout()
+def plot_eigs_condition(
+    root: Path,
+    label: Optional[str] = None,
+    **kwargs,
+):
+    """Single-condition convenience wrapper (no S/A fallback)."""
+    if label is None:
+        label = Path(root).name
+    return overlay_eigs_snapshots({label: Path(root)}, **kwargs)
 
 
 # ----------------------------
@@ -285,8 +395,8 @@ def overlay_loss(
     Overlay loss curves for multiple conditions with adjustable font size and figure size.
     Optionally fit ln(loss) = slope*epoch + intercept (exponential decay) and plot the fit.
 
-    Returns a DataFrame with columns:
-      ["condition","init_epoch","init_loss","slope","intercept","r2","half_life_epochs","fit_emin","fit_emax"]
+    Fit line color matches the corresponding mean curve and is dashed.
+    Legend text is attached to the original (solid) line, not the fit.
     """
     import numpy as np
     import pandas as pd
@@ -320,16 +430,15 @@ def overlay_loss(
             lo_plot = mu - sd
             hi_plot = mu + sd
 
-        # plot mean ± sd band
-        plt.plot(ep, mu_plot, label=label_with_init)
-        plt.fill_between(ep, lo_plot, hi_plot, alpha=0.15)
+        # plot mean (capture handle) and ± sd band
+        (line,) = plt.plot(ep, mu_plot, label=label_with_init)
+        c = line.get_color()
+        plt.fill_between(ep, lo_plot, hi_plot, alpha=0.15, color=c)
 
         # ---- optional fit on ln(loss) ----
         slope = intercept = r2 = half_life = np.nan
         f_emin = ep.min() if fit_range is None else fit_range[0]
-        f_emax = (
-            ep.max() if fit_range is None else fit_range[1] if len(ep) else ep.max()
-        )
+        f_emax = ep.max() if fit_range is None else fit_range[1]
 
         if fit:
             mask = (ep >= f_emin) & (ep <= f_emax)
@@ -347,7 +456,9 @@ def overlay_loss(
                     else np.nan
                 )
                 r2 = (
-                    1.0 - (ss_res / ss_tot) if (ss_tot not in (0.0, np.nan)) else np.nan
+                    (1.0 - (ss_res / ss_tot))
+                    if (ss_tot not in (0.0, np.nan))
+                    else np.nan
                 )
 
                 half_life = (np.log(2) / -slope) if slope < 0 else np.inf
@@ -356,10 +467,11 @@ def overlay_loss(
                     ep_line = np.linspace(ep_fit.min(), ep_fit.max(), 200)
                     mu_fit = np.exp(slope * ep_line + intercept)
                     mu_fit_plot = np.clip(mu_fit, eps, None) if logy else mu_fit
-                    plt.plot(ep_line, mu_fit_plot, linestyle="--", alpha=0.8)
+                    # match color, dashed; no legend entry
+                    plt.plot(ep_line, mu_fit_plot, linestyle="--", alpha=0.9, color=c)
 
-                # append slope to last line's legend entry
-                plt.gca().lines[-1].set_label(f"{label_with_init} (k≈{slope:.2e})")
+                # Attach slope to the ORIGINAL line's legend entry
+                line.set_label(f"{label_with_init} (k≈{slope:.2e})")
 
         results.append(
             {
@@ -427,6 +539,9 @@ def overlay_metric(
     Overlay any metric (mean ± sd across runs) with adjustable fonts/size,
     optional log plotting, and optional curve fitting.
 
+    Fit line color matches the corresponding mean curve and is dashed.
+    Legend text is attached to the original (solid) line, not the fit.
+
     Fitting options:
       - if fit and fit_on_log:   ln(mean(metric)) ~ slope * epoch + intercept  (exp-like trends)
       - if fit and not fit_on_log: mean(metric) ~ slope * epoch + intercept   (linear trend)
@@ -468,24 +583,21 @@ def overlay_metric(
             lo_plot = mu - sd
             hi_plot = mu + sd
 
-        plt.plot(ep, mu_plot, label=label)
-        plt.fill_between(ep, lo_plot, hi_plot, alpha=0.15)
+        # plot mean and capture handle/color
+        (line,) = plt.plot(ep, mu_plot, label=label)
+        c = line.get_color()
+        plt.fill_between(ep, lo_plot, hi_plot, alpha=0.15, color=c)
 
         # ---- optional fit ----
         slope = intercept = r2 = half_life = np.nan
         f_emin = ep.min() if fit_range is None else fit_range[0]
-        f_emax = (
-            ep.max() if fit_range is None else fit_range[1] if len(ep) else ep.max()
-        )
+        f_emax = ep.max() if fit_range is None else fit_range[1]
 
         if fit:
             mask = (ep >= f_emin) & (ep <= f_emax)
             ep_fit = ep[mask]
             y_raw = mu[mask]
-            if fit_on_log:
-                y_fit = np.log(np.clip(y_raw, eps, None))
-            else:
-                y_fit = y_raw
+            y_fit = np.log(np.clip(y_raw, eps, None)) if fit_on_log else y_raw
 
             if ep_fit.size >= 2 and np.all(np.isfinite(y_fit)):
                 slope, intercept = np.polyfit(ep_fit, y_fit, 1)
@@ -498,7 +610,9 @@ def overlay_metric(
                     else np.nan
                 )
                 r2 = (
-                    1.0 - (ss_res / ss_tot) if (ss_tot not in (0.0, np.nan)) else np.nan
+                    (1.0 - (ss_res / ss_tot))
+                    if (ss_tot not in (0.0, np.nan))
+                    else np.nan
                 )
 
                 if fit_on_log and slope < 0:
@@ -513,11 +627,12 @@ def overlay_metric(
                     else:
                         y_line = slope * ep_line + intercept
                     y_line_plot = np.clip(y_line, eps, None) if logy else y_line
-                    plt.plot(ep_line, y_line_plot, linestyle="--", alpha=0.8)
+                    # dashed fit with the SAME color; no legend entry
+                    plt.plot(ep_line, y_line_plot, linestyle="--", alpha=0.9, color=c)
 
-                # annotate slope on the most recent line's label
                 kind = "log-fit" if fit_on_log else "lin-fit"
-                plt.gca().lines[-1].set_label(f"{label} (k≈{slope:.2e}, {kind})")
+                # Attach slope/kind info to the ORIGINAL line's legend label
+                line.set_label(f"{label} (k≈{slope:.2e}, {kind})")
 
         results.append(
             {
@@ -577,6 +692,130 @@ def overlay_quick(condition_series: dict):
     ]:
         if any(key in ts.columns for ts in condition_series.values()):
             overlay_metric(condition_series, key, title=key)
+
+
+def overlay_eigs_snapshots(
+    condition_roots: Dict[str, Path],
+    snapshot: str = "last",  # "first" | "middle" | "last"
+    matrix: str = "W",  # "W" | "S" | "A"
+    title: str = "Eigenvalues",
+    fontsize: int = 12,
+    figsize: Tuple[float, float] = (6.0, 6.0),
+    max_points_per_run: int = 1000,
+    unit_circle: bool = True,
+    s: float = 6.0,  # marker size
+    alpha: float = 0.5,  # point alpha
+    seed: Optional[int] = 0,  # for reproducible downsampling
+):
+    """
+    Overlay eigenvalues for one or more conditions, choosing which snapshot and which matrix.
+    NO fallback: if matrix='S' or 'A' and the file for that snapshot is missing, that run is skipped.
+    """
+    rng = np.random.default_rng(seed)
+    snapshot = snapshot.lower().strip()
+    matrix = matrix.upper().strip()  # W/S/A
+
+    if snapshot not in {"first", "middle", "last"}:
+        raise ValueError("snapshot must be one of {'first','middle','last'}")
+    if matrix not in {"W", "S", "A"}:
+        raise ValueError("matrix must be one of {'W','S','A'}")
+
+    def _pick_index(n: int) -> Optional[int]:
+        if n <= 0:
+            return None
+        if snapshot == "first":
+            return 0
+        if snapshot == "last":
+            return n - 1
+        return n // 2  # middle
+
+    plt.figure(figsize=figsize)
+    any_points = False
+
+    for label, root in condition_roots.items():
+        runs = _sorted_runs(Path(root))
+        if not runs:
+            print(f"[warn] no runs under {root}")
+            continue
+
+        all_re, all_im = [], []
+
+        for run_dir in runs:
+            snaps = _snapshot_list(
+                run_dir
+            )  # list of (epoch, Wp, Sp_or_None, Ap_or_None)
+            if not snaps:
+                continue
+
+            idx = _pick_index(len(snaps))
+            if idx is None:
+                continue
+
+            ep, Wp, Sp, Ap = snaps[idx]
+
+            # strict selection: require the exact file for S/A
+            if matrix == "W":
+                sel_path = Wp
+            elif matrix == "S":
+                if Sp is None or (not Sp.exists()):
+                    print(
+                        f"[warn] missing S file for run {run_dir.name} @ epoch {ep}; skipping this run."
+                    )
+                    continue
+                sel_path = Sp
+            else:  # "A"
+                if Ap is None or (not Ap.exists()):
+                    print(
+                        f"[warn] missing A file for run {run_dir.name} @ epoch {ep}; skipping this run."
+                    )
+                    continue
+                sel_path = Ap
+
+            W = torch.load(sel_path, map_location="cpu").cpu().numpy()
+            vals = _eigvals_np(W)
+
+            # optional downsample per run
+            if vals.size > max_points_per_run:
+                idxs = rng.choice(vals.size, max_points_per_run, replace=False)
+                vals = vals[idxs]
+
+            all_re.append(np.real(vals))
+            all_im.append(np.imag(vals))
+
+        if all_re:
+            X = np.concatenate(all_re)
+            Y = np.concatenate(all_im)
+            plt.scatter(X, Y, s=s, alpha=alpha, label=label)
+            any_points = True
+
+    if not any_points:
+        plt.close()
+        print(
+            "[warn] nothing to plot (no snapshots found or required S/A files missing)"
+        )
+        return
+
+    # axes & styling
+    ax = plt.gca()
+    ax.axhline(0, lw=0.5, c="k")
+    ax.axvline(0, lw=0.5, c="k")
+    if unit_circle:
+        circle = plt.Circle((0, 0), 1.0, fill=False, linestyle="--", alpha=0.3)
+        ax.add_artist(circle)
+    ax.set_aspect("equal", adjustable="box")
+
+    # Legend outside
+    plt.title(f"{title} — {matrix}@{snapshot}", fontsize=fontsize)
+    plt.xlabel("Re(λ)", fontsize=fontsize)
+    plt.ylabel("Im(λ)", fontsize=fontsize)
+    plt.legend(
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
+        fontsize=max(6, fontsize - 1),
+    )
+    plt.tick_params(axis="both", which="major", labelsize=max(6, fontsize - 2))
+    plt.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))  # leave room for outside legend
 
 
 # ----------------------------

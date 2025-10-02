@@ -8,21 +8,20 @@ import pandas as pd
 import torch
 import matplotlib.pyplot as plt
 from typing import Optional, Tuple, Dict
+from matplotlib.lines import Line2D
 
 
 # ----------------------------
 # CONFIG: set these 3 and run
 # ----------------------------
-WHH_TYPE = "shiftcyctridiag"  # e.g. baseline|cycshift|shiftcycmh|identity|...
-WHH_NORM = (
-    "frobenius"  # frobenius|spectral|variance|none  (baseline uses 'none' folder)
-)
+WHH_TYPE = "baseline"  # e.g. baseline|cycshift|shiftcycmh|identity|...
+WHH_NORM = "none"  # frobenius|spectral|variance|none  (baseline uses 'none' folder)
 INPUT = "asym1"  # matches <INPUT> in Ns100_SeqN100_<INPUT>.pth.tar
 
 ROOT = (
     Path("SymAsymRNN")
     / "N100T100"
-    / "lambda0p5"
+    / "lambda0p75"
     / WHH_TYPE
     / WHH_NORM
     / INPUT
@@ -400,13 +399,13 @@ def overlay_loss(
     plot_fit: bool = True,
     logy: bool = True,  # plot on log y-axis if True
     eps: float = 1e-12,  # positivity floor for log
+    linewidth: float = 2.0,  # plotted line width
+    fit_linewidth: float = 1.5,  # plotted fit line width
+    legend_linewidth: Optional[float] = None,  # legend-only line width
 ):
     """
-    Overlay loss curves for multiple conditions with adjustable font size and figure size.
-    Optionally fit ln(loss) = slope*epoch + intercept (exponential decay) and plot the fit.
-
-    Fit line color matches the corresponding mean curve and is dashed.
-    Legend text is attached to the original (solid) line, not the fit.
+    Overlay loss curves for multiple conditions. Mean ± SD bands, optional log-y,
+    optional exp-style fit on ln(loss). Legend lines are thicker than plotted lines.
     """
     import numpy as np
     import pandas as pd
@@ -415,6 +414,7 @@ def overlay_loss(
     plt.figure(figsize=figsize)
     results = []
     any_series = False
+    legend_handles, legend_labels = [], []
 
     for label, ts in condition_series.items():
         g = ts.groupby("epoch")["loss"]
@@ -440,8 +440,8 @@ def overlay_loss(
             lo_plot = mu - sd
             hi_plot = mu + sd
 
-        # plot mean (capture handle) and ± sd band
-        (line,) = plt.plot(ep, mu_plot, label=label_with_init)
+        # plot mean (capture handle/color) and ± sd band
+        (line,) = plt.plot(ep, mu_plot, label=label_with_init, lw=linewidth)
         c = line.get_color()
         plt.fill_between(ep, lo_plot, hi_plot, alpha=0.15, color=c)
 
@@ -455,7 +455,6 @@ def overlay_loss(
             ep_fit = ep[mask]
             y_fit = np.log(np.clip(mu[mask], eps, None))
             if ep_fit.size >= 2 and np.all(np.isfinite(y_fit)):
-                # linear least squares on log-loss
                 slope, intercept = np.polyfit(ep_fit, y_fit, 1)
 
                 y_pred = slope * ep_fit + intercept
@@ -470,18 +469,29 @@ def overlay_loss(
                     if (ss_tot not in (0.0, np.nan))
                     else np.nan
                 )
-
                 half_life = (np.log(2) / -slope) if slope < 0 else np.inf
 
                 if plot_fit:
                     ep_line = np.linspace(ep_fit.min(), ep_fit.max(), 200)
                     mu_fit = np.exp(slope * ep_line + intercept)
                     mu_fit_plot = np.clip(mu_fit, eps, None) if logy else mu_fit
-                    # match color, dashed; no legend entry
-                    plt.plot(ep_line, mu_fit_plot, linestyle="--", alpha=0.9, color=c)
+                    plt.plot(
+                        ep_line,
+                        mu_fit_plot,
+                        linestyle="--",
+                        alpha=0.9,
+                        color=c,
+                        lw=fit_linewidth,
+                    )
 
-                # Attach slope to the ORIGINAL line's legend entry
+                # Attach slope to the ORIGINAL line's legend label
                 line.set_label(f"{label_with_init} (k≈{slope:.2e})")
+
+        # custom legend handle (thicker, same color)
+        leg_lw = legend_linewidth if legend_linewidth is not None else linewidth * 1.6
+        handle = Line2D([0], [0], color=c, lw=leg_lw)
+        legend_handles.append(handle)
+        legend_labels.append(line.get_label())
 
         results.append(
             {
@@ -525,10 +535,18 @@ def overlay_loss(
 
     plt.xlabel("epoch", fontsize=fontsize)
     plt.title(title, fontsize=fontsize)
-    plt.legend(fontsize=max(6, fontsize - 1))
+    # outside legend with custom thick handles
+    plt.legend(
+        legend_handles,
+        legend_labels,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
+        fontsize=max(6, fontsize - 1),
+        frameon=False,
+    )
     plt.tick_params(axis="both", which="major", labelsize=max(6, fontsize - 2))
-    plt.tight_layout()
-
+    plt.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))
     return pd.DataFrame(results)
 
 
@@ -540,25 +558,17 @@ def overlay_metric(
     figsize: Tuple[float, float] = (6.0, 4.0),
     logy: bool = False,  # optional log plotting
     fit: bool = False,  # optional curve fitting
-    fit_on_log: bool = True,  # if True, fit ln(mean(metric)) vs epoch
+    fit_on_log: bool = True,  # fit ln(mean(metric)) vs epoch if True
     fit_range: Optional[Tuple[int, int]] = None,  # (emin, emax)
     plot_fit: bool = True,
     eps: float = 1e-12,
+    linewidth: float = 2.0,  # plotted line width
+    fit_linewidth: float = 1.5,  # plotted fit line width
+    legend_linewidth: Optional[float] = None,  # legend-only line width
 ):
     """
-    Overlay any metric (mean ± sd across runs) with adjustable fonts/size,
-    optional log plotting, and optional curve fitting.
-
-    Fit line color matches the corresponding mean curve and is dashed.
-    Legend text is attached to the original (solid) line, not the fit.
-
-    Fitting options:
-      - if fit and fit_on_log:   ln(mean(metric)) ~ slope * epoch + intercept  (exp-like trends)
-      - if fit and not fit_on_log: mean(metric) ~ slope * epoch + intercept   (linear trend)
-
-    Returns a DataFrame with columns:
-      ["condition","slope","intercept","r2","half_life_epochs","fit_emin","fit_emax"]
-      (half_life_epochs only meaningful for exp fits with negative slope)
+    Overlay any metric (mean ± sd across runs). Optional log plotting & fitting.
+    Legend lines are thicker than plotted lines via custom legend handles.
     """
     import numpy as np
     import pandas as pd
@@ -570,6 +580,7 @@ def overlay_metric(
     plt.figure(figsize=figsize)
     results = []
     any_series = False
+    legend_handles, legend_labels = [], []
 
     for label, ts in condition_series.items():
         if key not in ts.columns:
@@ -593,8 +604,7 @@ def overlay_metric(
             lo_plot = mu - sd
             hi_plot = mu + sd
 
-        # plot mean and capture handle/color
-        (line,) = plt.plot(ep, mu_plot, label=label)
+        (line,) = plt.plot(ep, mu_plot, label=label, lw=linewidth)
         c = line.get_color()
         plt.fill_between(ep, lo_plot, hi_plot, alpha=0.15, color=c)
 
@@ -637,12 +647,23 @@ def overlay_metric(
                     else:
                         y_line = slope * ep_line + intercept
                     y_line_plot = np.clip(y_line, eps, None) if logy else y_line
-                    # dashed fit with the SAME color; no legend entry
-                    plt.plot(ep_line, y_line_plot, linestyle="--", alpha=0.9, color=c)
+                    plt.plot(
+                        ep_line,
+                        y_line_plot,
+                        linestyle="--",
+                        alpha=0.9,
+                        color=c,
+                        lw=fit_linewidth,
+                    )
 
                 kind = "log-fit" if fit_on_log else "lin-fit"
-                # Attach slope/kind info to the ORIGINAL line's legend label
                 line.set_label(f"{label} (k≈{slope:.2e}, {kind})")
+
+        # custom thick legend handle
+        leg_lw = legend_linewidth if legend_linewidth is not None else linewidth * 1.6
+        handle = Line2D([0], [0], color=c, lw=leg_lw)
+        legend_handles.append(handle)
+        legend_labels.append(line.get_label())
 
         results.append(
             {
@@ -682,10 +703,17 @@ def overlay_metric(
 
     plt.xlabel("epoch", fontsize=fontsize)
     plt.title(title, fontsize=fontsize)
-    plt.legend(fontsize=max(6, fontsize - 1))
+    plt.legend(
+        legend_handles,
+        legend_labels,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
+        fontsize=max(6, fontsize - 1),
+        frameon=False,
+    )
     plt.tick_params(axis="both", which="major", labelsize=max(6, fontsize - 2))
-    plt.tight_layout()
-
+    plt.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))
     return pd.DataFrame(results)
 
 
@@ -713,13 +741,14 @@ def overlay_eigs_snapshots(
     figsize: Tuple[float, float] = (6.0, 6.0),
     max_points_per_run: int = 1000,
     unit_circle: bool = True,
-    s: float = 6.0,  # marker size
+    s: float = 6.0,  # marker size (plot)
     alpha: float = 0.5,  # point alpha
     seed: Optional[int] = 0,  # for reproducible downsampling
+    legend_marker_size: float = 10,  # NEW: larger legend dot size (points)
 ):
     """
-    Overlay eigenvalues for one or more conditions, choosing which snapshot and which matrix.
-    NO fallback: if matrix='S' or 'A' and the file for that snapshot is missing, that run is skipped.
+    Overlay eigenvalues for one or more conditions, choosing snapshot and matrix.
+    Legend shows larger dots via custom handles; plot markers remain size `s`.
     """
     rng = np.random.default_rng(seed)
     snapshot = snapshot.lower().strip()
@@ -741,6 +770,8 @@ def overlay_eigs_snapshots(
 
     plt.figure(figsize=figsize)
     any_points = False
+    legend_handles = []  # custom handles with bigger markers
+    legend_labels = []
 
     for label, root in condition_roots.items():
         runs = _sorted_runs(Path(root))
@@ -751,40 +782,30 @@ def overlay_eigs_snapshots(
         all_re, all_im = [], []
 
         for run_dir in runs:
-            snaps = _snapshot_list(
-                run_dir
-            )  # list of (epoch, Wp, Sp_or_None, Ap_or_None)
+            snaps = _snapshot_list(run_dir)
             if not snaps:
                 continue
-
             idx = _pick_index(len(snaps))
             if idx is None:
                 continue
 
             ep, Wp, Sp, Ap = snaps[idx]
-
-            # strict selection: require the exact file for S/A
             if matrix == "W":
                 sel_path = Wp
             elif matrix == "S":
                 if Sp is None or (not Sp.exists()):
-                    print(
-                        f"[warn] missing S file for run {run_dir.name} @ epoch {ep}; skipping this run."
-                    )
+                    print(f"[warn] missing S for {run_dir.name}@{ep}; skip.")
                     continue
                 sel_path = Sp
             else:  # "A"
                 if Ap is None or (not Ap.exists()):
-                    print(
-                        f"[warn] missing A file for run {run_dir.name} @ epoch {ep}; skipping this run."
-                    )
+                    print(f"[warn] missing A for {run_dir.name}@{ep}; skip.")
                     continue
                 sel_path = Ap
 
             W = torch.load(sel_path, map_location="cpu").cpu().numpy()
             vals = _eigvals_np(W)
 
-            # optional downsample per run
             if vals.size > max_points_per_run:
                 idxs = rng.choice(vals.size, max_points_per_run, replace=False)
                 vals = vals[idxs]
@@ -795,14 +816,26 @@ def overlay_eigs_snapshots(
         if all_re:
             X = np.concatenate(all_re)
             Y = np.concatenate(all_im)
-            plt.scatter(X, Y, s=s, alpha=alpha, label=label)
+            sc = plt.scatter(X, Y, s=s, alpha=alpha, label=label)
+            # build a custom legend handle that uses the same color but larger marker
+            color = sc.get_facecolor()[0]  # RGBA
+            handle = Line2D(
+                [0],
+                [0],
+                linestyle="none",
+                marker="o",
+                markersize=legend_marker_size,
+                markerfacecolor=color,
+                markeredgecolor=color,
+                alpha=1.0,
+            )
+            legend_handles.append(handle)
+            legend_labels.append(label)
             any_points = True
 
     if not any_points:
         plt.close()
-        print(
-            "[warn] nothing to plot (no snapshots found or required S/A files missing)"
-        )
+        print("[warn] nothing to plot")
         return
 
     # axes & styling
@@ -814,18 +847,22 @@ def overlay_eigs_snapshots(
         ax.add_artist(circle)
     ax.set_aspect("equal", adjustable="box")
 
-    # Legend outside
     plt.title(f"{title} — {matrix}@{snapshot}", fontsize=fontsize)
     plt.xlabel("Re(λ)", fontsize=fontsize)
     plt.ylabel("Im(λ)", fontsize=fontsize)
+
+    # Legend outside using custom handles (bigger dots)
     plt.legend(
+        legend_handles,
+        legend_labels,
         loc="center left",
         bbox_to_anchor=(1.02, 0.5),
         borderaxespad=0.0,
         fontsize=max(6, fontsize - 1),
+        frameon=False,
     )
     plt.tick_params(axis="both", which="major", labelsize=max(6, fontsize - 2))
-    plt.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))  # leave room for outside legend
+    plt.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))
 
 
 # ----------------------------

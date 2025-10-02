@@ -130,7 +130,8 @@ class SymAsymRNN(nn.Module):
 
         # unconstrained raw param
         # self.lambda_raw = nn.Parameter(torch.tensor(0.0))  # sigmoid(0) = 0.5
-        self.lambda_raw = nn.Parameter(torch.tensor(1.0986))
+        # self.lambda_raw = nn.Parameter(torch.tensor(1.0986))  # 0.75
+        self.lambda_raw = nn.Parameter(torch.tensor(-1.0986))  # 0.25
 
         # input/output modules
         self.input_linear = nn.Linear(input_dim, hidden_dim)

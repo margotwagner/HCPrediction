@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export WHH_TYPE="shiftcyctridiag"        # or baseline, cycshift, ...
-export WHH_NORM="frobenius"     # frobenius|spectral|variance|none
+export WHH_TYPE="baseline"        # or baseline, cycshift, ...
+export WHH_NORM="none"     # frobenius|spectral|variance|none
 export INPUT="asym1"           # suffix in your file name (e.g., 1, asym1, etc.)
 
 # For baseline we still write a 'none' norm folder so paths are uniform

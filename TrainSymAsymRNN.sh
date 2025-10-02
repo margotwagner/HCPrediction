@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export WHH_TYPE="cycshift"        # or baseline, cycshift, ...
+export WHH_TYPE="shiftcyctridiag"        # or baseline, cycshift, ...
 export WHH_NORM="frobenius"     # frobenius|spectral|variance|none
 export INPUT="asym1"           # suffix in your file name (e.g., 1, asym1, etc.)
 

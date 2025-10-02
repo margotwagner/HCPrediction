@@ -13,8 +13,10 @@ from typing import Optional, Tuple, Dict
 # ----------------------------
 # CONFIG: set these 3 and run
 # ----------------------------
-WHH_TYPE = "baseline"  # e.g. baseline|cycshift|shiftcycmh|identity|...
-WHH_NORM = "none"  # frobenius|spectral|variance|none  (baseline uses 'none' folder)
+WHH_TYPE = "shiftmh"  # e.g. baseline|cycshift|shiftcycmh|identity|...
+WHH_NORM = (
+    "frobenius"  # frobenius|spectral|variance|none  (baseline uses 'none' folder)
+)
 INPUT = "asym1"  # matches <INPUT> in Ns100_SeqN100_<INPUT>.pth.tar
 
 ROOT = Path("SymAsymRNN") / "N100T100" / WHH_TYPE / WHH_NORM / INPUT / "multiruns"

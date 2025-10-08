@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 from RNN_Class import *
 from tqdm import tqdm
+import random
 
 
 parser = argparse.ArgumentParser(description="PyTorch Elman BPTT Training")
@@ -159,6 +160,36 @@ parser.add_argument(
     type=float,
     help="If > 0, add multiplicative Gaussian noise ~N(0, (X*noisy_train)^2) to X and Target each step",
 )
+parser.add_argument("--seed", type=int, default=1337, help="Global RNG seed")
+parser.add_argument(
+    "--whh_type",
+    type=str,
+    default="identity",
+    choices=[
+        "none",
+        "cent",
+        "cent-cyc",
+        "shifted",
+        "shifted-cyc",
+        "identity",
+        "shift",
+        "shift-cyc",
+    ],
+    help="Hidden-weight init type; use 'none' for standard random init (no override).",
+)
+parser.add_argument(
+    "--whh_norm",
+    type=str,
+    default="raw",
+    choices=["frobenius", "raw"],
+    help="Normalization strategy for hidden weight",
+)
+parser.add_argument(
+    "--alpha",
+    type=float,
+    default=None,
+    help="Symmetry percent in [0,1]. Needed for shifted/shift variants; ignored for cent/cent-cyc/identity",
+)
 
 
 def main():
@@ -170,6 +201,7 @@ def main():
     n_epochs = args.epochs
     N = args.n
     hidden_N = args.hidden_n
+    set_seed(args.seed)
 
     # ---------------------
     # Open a simple log file
@@ -203,6 +235,19 @@ def main():
     # ---------------------
     # ElmanRNN_pytorch_module_v2: (input_dim=N, hidden_dim=hidden_N, output_dim=N)
     net = ElmanRNN_pytorch_module_v2(N, hidden_N, N)
+
+    # --- override hidden weight from disk ---
+    if args.whh_type != "none":
+        try:
+            path = _resolve_hidden_path(
+                hidden_N, args.whh_type, args.whh_norm, args.alpha
+            )
+            print(f"[whh] loading hidden weight from: {path}", file=f)
+            _load_hidden_into_elman(net, path, device=net.rnn.weight_hh_l0.device)
+        except Exception as e:
+            print(f"[whh] WARNING: failed to load init: {e}", file=f)
+    else:
+        print("[whh] using default random init", file=f)
 
     # Optionally change the RNN hidden nonlinearity
     if args.rnn_act == "relu":
@@ -352,7 +397,7 @@ def main():
     # Train and time it
     # ----------------------
     start = time.time()
-    net, loss_list, grad_list, hidden, y_hat = train_partial(
+    net, loss_list, grad_list, hidden, y_hat, snapshot_epochs = train_partial(
         X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, Mask
     )
     end = time.time()
@@ -378,6 +423,11 @@ def main():
         "Target_mini": Target_mini.cpu(),  # targets (for analysis)
         "loss": loss_list,  # scalar training loss per epoch
         "grad_norm": grad_list,  # simple grad stats list per epoch
+        "n_epochs": int(n_epochs),  # NEW
+        "args": vars(args),  # NEW (CLI config)
+        "env": env_report(),  # NEW (versions/flags)
+        "rng": rng_snapshot(),  # NEW (resume deterministically)
+        "snapshot_epochs": snapshot_epochs,  # epochs at which hidden/output were recorded
     }
     if args.partial:
         save_dict["Mask_W"] = Mask_W
@@ -428,6 +478,7 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
     hidden_rep = []  # periodic hidden state snapshots
     output_rep = []  # periodic output snapshots
     grad_list = []  # per-epoch gradient stats
+    snapshot_epochs = []  # epochs at which snapshots were taken
 
     with tqdm(total=n_epochs, desc="Progress", unit="epoch") as pbar:
         for epoch in range(n_epochs):
@@ -516,6 +567,7 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
                 start = time.time()
                 hidden_rep.append(h_seq.detach().cpu().numpy())
                 output_rep.append(output.detach().cpu().numpy())
+                snapshot_epochs.append(epoch)
                 print("Epoch: {}/{}.............".format(epoch, n_epochs), end=" ")
                 print("Loss: {:.4f}".format(loss.item()))
                 print("Time Elapsed since last display: {0:.1f} seconds".format(deltat))
@@ -525,7 +577,111 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
                     )
                 )
 
-    return net, loss_list, grad_list, hidden_rep, output_rep
+    return net, loss_list, grad_list, hidden_rep, output_rep, snapshot_epochs
+
+
+# ------------------
+# Utility functions
+# ------------------
+def set_seed(seed: int = 1337):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    # keep cuDNN fast/non-deterministic
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+
+
+def env_report():
+    return {
+        "python": sys.version.split()[0],
+        "torch": getattr(torch, "__version__", None),
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
+        "cudnn_deterministic": torch.backends.cudnn.deterministic,
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+    }
+
+
+def rng_snapshot():
+    return {
+        "py_random": None,  # fill only if you seeded Python's random
+        "np_random": np.random.get_state()[1].tolist(),  # the uint32 keys
+        "torch_cpu": torch.get_rng_state().tolist(),
+        "torch_cuda": [s.tolist() for s in torch.cuda.get_rng_state_all()]
+        if torch.cuda.is_available()
+        else None,
+    }
+
+
+def _alpha_tag(a: float) -> str:
+    """0.90 -> 'sym0p90', 1.0 -> 'sym1p00'"""
+    pct = int(round(a * 100))
+    major = pct // 100
+    minor = pct % 100
+    return f"sym{major}p{minor:02d}"
+
+
+def _resolve_variant(whh_type: str) -> str:
+    if whh_type in {"cent", "cent-cyc", "shifted", "shifted-cyc"}:
+        return "mh-variants"
+    else:  # {"identity","shift","shift-cyc"}
+        return "shift-variants"
+
+
+def _prefix_from_type(whh_type: str) -> str:
+    mapping = {
+        "cent": "centmh",
+        "cent-cyc": "centcycmh",
+        "shifted": "shiftmh",
+        "shifted-cyc": "shiftcycmh",
+        "identity": "identity",
+        "shift": "shift",
+        "shift-cyc": "shiftcyc",
+    }
+    return mapping[whh_type]
+
+
+def _norm_shortname(norm: str) -> str:
+    return {"frobenius": "fro", "raw": "raw"}[norm]
+
+
+def _resolve_hidden_path(
+    hidden_N: int, whh_type: str, whh_norm: str, alpha: float | None
+) -> str:
+    variant = _resolve_variant(whh_type)
+    norm_dir = whh_norm  # directory name is full strategy
+    base = f"./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/{variant}/{whh_type}/{norm_dir}"
+    # alpha tag needed for {shifted, shifted-cyc, shift, shift-cyc}
+    if whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}:
+        if alpha is None:
+            raise ValueError(
+                "alpha is required for this whh_type (e.g., --alpha 0.90)."
+            )
+        base = f"{base}/{_alpha_tag(alpha)}"
+    prefix = _prefix_from_type(whh_type)
+    norm_short = _norm_shortname(whh_norm)
+    # If your files are strictly n100, set hidden_N=100 (or hardcode 100 here).
+    fname = f"{prefix}_n{hidden_N}_{norm_short}.npy"
+    return os.path.join(base, fname)
+
+
+def _load_hidden_into_elman(
+    net: nn.Module, npy_path: str, device: torch.device | None = None
+):
+    """Copy an (H,H) numpy array into ElmanRNN's recurrent weight."""
+    W = np.load(npy_path)
+    thW = torch.as_tensor(W, dtype=torch.float32)
+    if device is None:
+        device = next(net.parameters()).device
+    thW = thW.to(device)
+    with torch.no_grad():
+        # ElmanRNN_pytorch_module_v2 uses nn.RNN => weight_hh_l0 exists
+        net.rnn.weight_hh_l0.copy_(thW)
+        # keep biases as-is (minimal & straightforward)
 
 
 if __name__ == "__main__":

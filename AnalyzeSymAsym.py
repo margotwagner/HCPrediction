@@ -14,14 +14,16 @@ from matplotlib.lines import Line2D
 # ----------------------------
 # CONFIG: set these 3 and run
 # ----------------------------
-WHH_TYPE = "baseline"  # e.g. baseline|cycshift|shiftcycmh|identity|...
-WHH_NORM = "none"  # frobenius|spectral|variance|none  (baseline uses 'none' folder)
+WHH_TYPE = "centcycmh"  # e.g. baseline|cycshift|shiftcycmh|identity|...
+WHH_NORM = (
+    "frobenius"  # frobenius|spectral|variance|none  (baseline uses 'none' folder)
+)
 INPUT = "asym1"  # matches <INPUT> in Ns100_SeqN100_<INPUT>.pth.tar
 
 ROOT = (
     Path("SymAsymRNN")
     / "N100T100"
-    / "lambda0p75"
+    / "lambda0p10"
     / WHH_TYPE
     / WHH_NORM
     / INPUT
@@ -863,6 +865,396 @@ def overlay_eigs_snapshots(
     )
     plt.tick_params(axis="both", which="major", labelsize=max(6, fontsize - 2))
     plt.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))
+
+
+def overlay_jacobian_eigs_snapshots(
+    condition_roots: Dict[str, Path],
+    snapshot: str = "last",  # "first" | "middle" | "last"  -> which epoch snapshot
+    tstep: str = "middle",  # "first" | "middle" | "last"  -> which time-step within the minibatch
+    act: str = "tanh",  # nonlinearity used for the RNN state
+    title: str = "Jacobian eigenvalues",
+    fontsize: int = 12,
+    figsize: Tuple[float, float] = (6.0, 6.0),
+    max_points_per_run: int = 1000,
+    unit_circle: bool = True,
+    s: float = 6.0,  # marker size (plot)
+    alpha: float = 0.5,  # point alpha
+    seed: Optional[int] = 0,  # for reproducible downsampling
+    legend_marker_size: float = 10,  # larger legend dots
+):
+    """
+    Plot eigenvalues of the per-time-step Jacobian J_t = diag(f'(a_t)) @ W
+    using the saved per-epoch snapshots:
+      - W from Wh_epochXXXX.pt
+      - h_t and X_t from checkpoint history at the SAME epoch
+
+    Assumptions (fit your current setup):
+      * input_linear is fixed to identity and bias=0 (so a_t = W h_{t-1} + x_t)
+      * we approximate diag(f'(a_t)) by the batch-mean diag: D = diag(mean(f'(a_t), dim=0))
+      * 'act' is the hidden nonlinearity you trained with (default tanh).
+
+    Parameters
+    ----------
+    condition_roots : dict[str, Path]
+        Label -> path to the *multiruns* directory (same as other overlay_* funcs).
+    snapshot : {"first","middle","last"}
+        Which saved epoch to use (matches Wh/S/A file lists).
+    tstep : {"first","middle","last"}
+        Which time index within the saved minibatch sequence to use when forming J_t.
+    act : {"tanh","sigmoid","relu"}
+        Hidden activation for derivative f'(·).
+    """
+    rng = np.random.default_rng(seed)
+    snapshot = snapshot.lower().strip()
+    tstep = tstep.lower().strip()
+    act = act.lower().strip()
+
+    if snapshot not in {"first", "middle", "last"}:
+        raise ValueError("snapshot must be one of {'first','middle','last'}")
+    if tstep not in {"first", "middle", "last"}:
+        raise ValueError("tstep must be one of {'first','middle','last'}")
+
+    def _pick_index(n: int, which: str) -> Optional[int]:
+        if n <= 0:
+            return None
+        if which == "first":
+            return 0
+        if which == "last":
+            return n - 1
+        return n // 2  # middle
+
+    def _dphi(a_np: np.ndarray) -> np.ndarray:
+        # elementwise derivative of the hidden nonlinearity
+        if act == "tanh":
+            ta = np.tanh(a_np)
+            return 1.0 - ta * ta
+        if act == "sigmoid":
+            sig = 1.0 / (1.0 + np.exp(-a_np))
+            return sig * (1.0 - sig)
+        if act == "relu":
+            return (a_np > 0).astype(a_np.dtype)
+        raise ValueError("act must be one of {'tanh','sigmoid','relu'}")
+
+    plt.figure(figsize=figsize)
+    any_points = False
+    legend_handles, legend_labels = [], []
+
+    for label, root in condition_roots.items():
+        runs = _sorted_runs(Path(root))
+        if not runs:
+            print(f"[warn] no runs under {root}")
+            continue
+
+        all_re, all_im = [], []
+
+        for run_dir in runs:
+            # 1) choose epoch snapshot for this run
+            snaps = _snapshot_list(run_dir)  # list of (epoch, Wp, Sp, Ap)
+            if not snaps:
+                continue
+            i_snap = _pick_index(len(snaps), snapshot)
+            if i_snap is None:
+                continue
+            ep, Wp, _, _ = snaps[i_snap]
+
+            # 2) load W
+            W = torch.load(Wp, map_location="cpu").cpu().numpy()  # (H,H)
+
+            # 3) load checkpoint history to pull the matching minibatch snapshot
+            ckpt = _load_ckpt(run_dir / CKPT_NAME)
+            hist = ckpt.get("history", {}) or {}
+            ep_list = hist.get("epoch", []) or []
+            H_list = hist.get("hidden", []) or []  # list of tensors per saved epoch
+            X_list = hist.get("X_mini", []) or []  # list of tensors per saved epoch
+
+            # find matching index in history for this epoch
+            try:
+                j = [int(e) for e in ep_list].index(int(ep))
+            except ValueError:
+                print(f"[warn] epoch {ep} not in history for {run_dir.name}; skip run.")
+                continue
+
+            H = H_list[j].cpu().numpy()  # shape: (batch, T, H)
+            X = X_list[j].cpu().numpy()  # shape: (batch, T, D) with D==H in your setup
+
+            # 4) pick time step within the sequence
+            T = H.shape[1]
+            if T <= 0:
+                continue
+            if tstep == "first":
+                t = 0
+            elif tstep == "last":
+                t = T - 1
+            else:
+                t = T // 2
+
+            # previous hidden for preactivation (use zeros for t=0)
+            if t == 0:
+                h_prev = np.zeros_like(H[:, 0, :])  # (batch, H)
+            else:
+                h_prev = H[:, t - 1, :]  # (batch, H)
+            x_t = X[:, t, :]  # (batch, H) (Win=I, bias=0)
+
+            # 5) preactivation a_t = W h_{t-1} + x_t  (assuming Win=I, bias=0)
+            a_t = (h_prev @ W.T) + x_t  # (batch, H)
+
+            # 6) batch-mean diagonal derivative -> D = diag(mean(f'(a_t), axis=0))
+            dphi_mean = _dphi(a_t).mean(axis=0)  # (H,)
+            D = np.diag(dphi_mean)  # (H,H)
+
+            # 7) Jacobian and its eigenvalues
+            J = D @ W
+            vals = np.linalg.eigvals(J)
+
+            # optional downsample per run
+            if vals.size > max_points_per_run:
+                idxs = rng.choice(vals.size, max_points_per_run, replace=False)
+                vals = vals[idxs]
+
+            all_re.append(np.real(vals))
+            all_im.append(np.imag(vals))
+
+        if all_re:
+            Xp = np.concatenate(all_re)
+            Yp = np.concatenate(all_im)
+            sc = plt.scatter(Xp, Yp, s=s, alpha=alpha, label=label)
+            color = sc.get_facecolor()[0]
+            handle = Line2D(
+                [0],
+                [0],
+                linestyle="none",
+                marker="o",
+                markersize=legend_marker_size,
+                markerfacecolor=color,
+                markeredgecolor=color,
+                alpha=1.0,
+            )
+            legend_handles.append(handle)
+            legend_labels.append(label)
+            any_points = True
+
+    if not any_points:
+        plt.close()
+        print("[warn] nothing to plot for Jacobians")
+        return
+
+    # axes & styling
+    ax = plt.gca()
+    ax.axhline(0, lw=0.5, c="k")
+    ax.axvline(0, lw=0.5, c="k")
+    if unit_circle:
+        circle = plt.Circle((0, 0), 1.0, fill=False, linestyle="--", alpha=0.3)
+        ax.add_artist(circle)
+    ax.set_aspect("equal", adjustable="box")
+
+    plt.title(f"{title} — J@{snapshot}, t={tstep}, act={act}", fontsize=fontsize)
+    plt.xlabel("Re(λ)", fontsize=fontsize)
+    plt.ylabel("Im(λ)", fontsize=fontsize)
+
+    # legend outside with larger dots
+    plt.legend(
+        legend_handles,
+        legend_labels,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
+        fontsize=max(6, fontsize - 1),
+        frameon=False,
+    )
+    plt.tick_params(axis="both", which="major", labelsize=max(6, fontsize - 2))
+    plt.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))
+
+
+def overlay_weight_traces(
+    condition_roots: Dict[str, Path],
+    snapshot: str = "last",  # "first" | "middle" | "last"
+    use_rolling: bool = False,  # peak-time via moving average vs argmax
+    rolling_window: int = 5,  # only used if use_rolling=True
+    fontsize: int = 12,
+    figsize_per_cond: Tuple[float, float] = (4.8, 3.2),  # width × height PER column
+    show_heatmap: bool = True,
+    heat_clip_pct: float = 99.0,  # NEW: robust contrast; 99.0 works well
+    heat_interpolation: str = "nearest",  # NEW: avoids plaid seams
+):
+    """
+    For each condition (label -> root), pick ONE run (the first), select one snapshot
+    of Wh, sort units by hidden peak-time at the SAME epoch, and plot:
+      top row:   diagonal-offset trace sum_k trace(W_sorted, offset=k) + vertical k=0 line
+      bottom row: imshow of W_sorted with robust ±vlim (percentile clipping).
+    """
+    import numpy as np
+    import torch
+    import matplotlib.pyplot as plt
+
+    def _pick_index(n: int) -> Optional[int]:
+        if n <= 0:
+            return None
+        if snapshot == "first":
+            return 0
+        if snapshot == "last":
+            return n - 1
+        return n // 2  # "middle"
+
+    def _peak_times_from_hidden(
+        Harr: np.ndarray, use_roll: bool, win: int
+    ) -> np.ndarray:
+        # Harr: (B,T,H) or (T,H) -> (H,)
+        if Harr.ndim == 3:
+            Harr = Harr.mean(axis=0)  # (T,H)
+        T, H = Harr.shape
+        if use_roll:
+            w = max(1, int(win))
+            kernel = np.ones(w, dtype=float) / float(w)
+            smoothed = np.empty_like(Harr)
+            for j in range(H):
+                smoothed[:, j] = np.convolve(Harr[:, j], kernel, mode="same")
+            series = smoothed
+        else:
+            series = Harr
+        return np.argmax(series, axis=0)
+
+    labels = list(condition_roots.keys())
+    if not labels:
+        print("[warn] no conditions provided")
+        return
+
+    # ---------- gather data & compute robust color range per column ----------
+    cols_data = []  # [{label, offsets, trace, W_sorted, ep, vlim}, ...]
+    for label in labels:
+        root = Path(condition_roots[label])
+        runs = _sorted_runs(root)
+        if not runs:
+            print(f"[warn] no runs under {root}")
+            continue
+
+        run_dir = runs[0]  # one representative run per condition
+        snaps = _snapshot_list(run_dir)
+        if not snaps:
+            print(f"[warn] no snapshots under {run_dir / 'hidden-weights'}")
+            continue
+
+        snapshot_norm = snapshot.lower().strip()
+        if snapshot_norm not in {"first", "middle", "last"}:
+            raise ValueError("snapshot must be 'first'|'middle'|'last'")
+        idx = _pick_index(len(snaps))
+        if idx is None:
+            print(f"[warn] no snapshot index for {label}")
+            continue
+
+        ep, Wp, _, _ = snaps[idx]
+        W = torch.load(Wp, map_location="cpu").cpu().numpy()  # (H,H)
+
+        # sorting via hidden at the same epoch (if available)
+        sort_idx = np.arange(W.shape[0])
+        try:
+            ckpt = _load_ckpt(run_dir / CKPT_NAME)
+            hist = ckpt.get("history", {}) if ckpt else {}
+            ep_list = hist.get("epoch", []) or []
+            hid_list = hist.get("hidden", []) or []
+            if ep in ep_list:
+                j = ep_list.index(ep)
+                h = hid_list[j]
+                Harr = (
+                    h.detach().cpu().numpy()
+                    if isinstance(h, torch.Tensor)
+                    else np.array(h)
+                )
+                peak_t = _peak_times_from_hidden(
+                    Harr, use_roll=use_rolling, win=rolling_window
+                )
+                sort_idx = np.argsort(peak_t)
+            else:
+                print(f"[warn] epoch {ep} not found in history for {label}; no sorting")
+        except Exception as e:
+            print(f"[warn] could not derive sorting for {label}: {e}")
+
+        W_sorted = W[sort_idx, :][:, sort_idx]
+        H = W_sorted.shape[0]
+        offsets = np.arange(-(H - 1), H)
+        trace_vals = np.array([np.trace(W_sorted, offset=k) for k in offsets])
+
+        # robust symmetric ±vlim using percentile of |W|
+        if W_sorted.size:
+            lim = float(np.percentile(np.abs(W_sorted), heat_clip_pct))
+            vlim = (-1.001 * lim, +1.001 * lim)
+        else:
+            vlim = (-1.0, 1.0)
+
+        cols_data.append(
+            {
+                "label": label,
+                "offsets": offsets,
+                "trace": trace_vals,
+                "W_sorted": W_sorted,
+                "ep": ep,
+                "vlim": vlim,
+            }
+        )
+
+    if not cols_data:
+        print("[warn] nothing to plot")
+        return
+
+    # ---------- draw ----------
+    nC = len(cols_data)
+    nrows = 2 if show_heatmap else 1
+    fig_w = figsize_per_cond[0] * nC
+    fig_h = figsize_per_cond[1] * nrows
+    fig, axes = plt.subplots(nrows, nC, figsize=(fig_w, fig_h), squeeze=False)
+
+    heat_images = []  # keep handles to rasterize on save if needed
+
+    for col, cd in enumerate(cols_data):
+        label = cd["label"]
+        offsets = cd["offsets"]
+        trace = cd["trace"]
+        W_sorted = cd["W_sorted"]
+        ep = cd["ep"]
+        vmin, vmax = cd["vlim"]
+
+        # Top row: trace + vertical line at k=0
+        ax = axes[0, col]
+        ax.plot(offsets, trace, lw=1.8, label="sum diag(W_sorted, k)")
+        ax.axhline(0.0, color="r", linestyle="--", linewidth=1)
+        ax.axvline(0.0, color="k", linestyle=":", linewidth=1)  # NEW: vertical k=0
+        ax.set_xlabel("Diagonal offset (k)", fontsize=fontsize)
+        if col == 0:
+            ax.set_ylabel("Weight sum", fontsize=fontsize)
+        ax.set_title(f"{label}\n{snapshot_norm}@ep{ep}", fontsize=fontsize)
+        ax.tick_params(axis="both", which="major", labelsize=max(6, fontsize - 2))
+        if col == nC - 1:
+            ax.legend(fontsize=max(6, fontsize - 1))
+
+        # Bottom row: heatmap
+        if show_heatmap:
+            axh = axes[1, col]
+            im = axh.imshow(
+                W_sorted,
+                cmap="RdBu_r",
+                vmin=vmin,
+                vmax=vmax,
+                aspect="auto",
+                interpolation="nearest",  # avoids plaid on-screen
+                resample=False,  # avoids resampling seams
+            )
+            axh.set_xlabel("Presynaptic (sorted)", fontsize=fontsize)
+            if col == 0:
+                axh.set_ylabel("Postsynaptic (sorted)", fontsize=fontsize)
+            axh.tick_params(axis="both", which="major", labelsize=max(6, fontsize - 2))
+
+            cbar = fig.colorbar(im, ax=axh, fraction=0.046, pad=0.04)
+            cbar.ax.tick_params(labelsize=max(6, fontsize - 3))
+            heat_images.append(im)
+
+    # If you export to PDF/SVG and still see seams, rasterize images:
+    for im in heat_images:
+        try:
+            im.set_rasterized(True)
+        except Exception:
+            pass
+
+    plt.tight_layout()
+    plt.show()
 
 
 # ----------------------------

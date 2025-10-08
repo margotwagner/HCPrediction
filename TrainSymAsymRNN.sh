@@ -1,25 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export WHH_TYPE="centmh"        # or baseline, cycshift, ...
-export WHH_NORM="frobenius"     # frobenius|spectral|variance|none
-export INPUT="asym1"           # suffix in your file name (e.g., 1, asym1, etc.)
+export WHH_TYPE="learned"
+export WHH_NORM="frobenius"
+export INPUT="asym1"
 
-# For baseline we still write a 'none' norm folder so paths are uniform
+# NEW: choose initial lambda
+LAMBDA0="0.75"   # e.g. 0.25, 0.50, 0.75
+
+# format "lambda0p50" from "0.50"
+LAM_PCT="$(awk -v x="$LAMBDA0" 'BEGIN{printf "%d", int(x*100 + 0.5)}')"
+LAM_TAG="lambda0p$(printf '%02d' "$LAM_PCT")"
+
 NORM_DIR="${WHH_NORM}"
 if [[ "${WHH_TYPE}" == "baseline" ]]; then
   NORM_DIR="none"
 fi
 
-# New base includes <whh_type>/<whh_norm>/<input>
-BASE="SymAsymRNN/N100T100/${WHH_TYPE}/${NORM_DIR}/${INPUT}"
-
+BASE="SymAsymRNN/N100T100/${LAM_TAG}/${WHH_TYPE}/${NORM_DIR}/${INPUT}"
 echo "[plan] saving runs under: ${BASE}/multiruns/run_XX/"
 echo "[plan] encoding file: data/Ns100_SeqN100/encodings/Ns100_SeqN100_${INPUT}.pth.tar"
 
 for i in $(printf "%02d\n" {0..2}); do
   RUN_DIR="${BASE}/multiruns/run_${i}"
-  HW_DIR="${RUN_DIR}/hidden-weights"     # keep plural; it’s what Main_s4.py writes
+  HW_DIR="${RUN_DIR}/hidden-weights"
   mkdir -p "${HW_DIR}"
 
   nohup python Main_s4.py \
@@ -30,12 +34,14 @@ for i in $(printf "%02d\n" {0..2}); do
     --seed "${i}" \
     --epochs 30000 \
     --whh_type "${WHH_TYPE}" --whh_norm "${WHH_NORM}" \
+    --lambda0 "${LAMBDA0}" \
     --output_dir "${HW_DIR}" \
     --savename  "${RUN_DIR}/Ns100_SeqN100_predloss_full" \
     > "${RUN_DIR}/train.out" 2>&1
 done
 
-echo "Launched 10 runs under ${BASE}/multiruns/"
+echo "Launched 3 runs under ${BASE}/multiruns/"
+
 
 
 

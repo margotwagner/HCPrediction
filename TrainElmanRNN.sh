@@ -1,0 +1,1 @@
+python Main_s4.py --input data/Ns200_SeqN100_1.pth.tar --batch-size 1 --net ElmanRNN_tp1 --pred 1 --fixi 1 --savename Elman_SGD/Remap_predloss/Ns200_SeqN100_predloss_full

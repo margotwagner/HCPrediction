@@ -2751,7 +2751,7 @@ try:
 except NameError:
     # e.g., running inside a notebook cell
     MODULE_DIR = Path.cwd()
-DATA_DIR = MODULE_DIR / "data" / "Ns100_SeqN100"
+DATA_DIR = MODULE_DIR / "data" / "Ns100_SeqN100" / "encodings" / "prev"
 MODEL_ROOT = MODULE_DIR / "Elman_SGD" / "Remap_predloss" / "N100T100"
 MULTIRUNS_DIR = "multiruns"
 RUN_PREFIX = "run_"
@@ -2881,9 +2881,16 @@ def weight_trace_single_run(
     wh_type: Optional[str] = None,
     i_type: Optional[str] = None,
     plot: bool = True,
+    save: bool = True,
+    plot_eigs: bool = False,  # NEW: show eigenspectrum panel
+    save_eigs: bool = True,  # NEW: save eigenvalues if saving
+    rho_ref: Optional[float] = 1.0,  # NEW: draw |λ|=rho_ref circle if set
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Returns: (offsets, trace_vals, sort_idx)
+
+    Saves npy arrays (W_sorted, trace_vals, offsets, sort_idx[, eigvals])
+    and a figure in the run directory. Filenames include tag = 'argmax' or 'rolling'.
     """
     ckpt = _load_ckpt(model_path, map_location=device)
     state_dict = ckpt["state_dict"]
@@ -2893,7 +2900,7 @@ def weight_trace_single_run(
         state_dict, N=N, SeqN=SeqN, HN=HN, activation=activation, device=device
     )
 
-    # peak times: argmax OR rolling-mean argmax
+    # peak times -> sorting
     peak_t = compute_peak_times(
         hidden_seq, use_rolling=use_rolling, rolling_window=rolling_window
     )
@@ -2903,40 +2910,392 @@ def weight_trace_single_run(
     offsets = np.arange(-(HN - 1), HN)
     trace_vals = np.array([np.trace(W_sorted, offset=k) for k in offsets])
 
-    if not plot:
-        return offsets, trace_vals, sort_idx
+    # tag + paths
+    tag = "rolling" if use_rolling else "argmax"
+    run_dir = Path(model_path).parent
+
+    # optional eigenspectrum (computed once)
+    lam = None
+    if plot_eigs or (save and save_eigs):
+        lam = np.linalg.eigvals(W_sorted)
+
+    # save arrays
+    if save:
+        np.save(run_dir / f"W_sorted_{tag}.npy", W_sorted)
+        np.save(run_dir / f"trace_vals_{tag}.npy", trace_vals)
+        np.save(run_dir / f"offsets_{tag}.npy", offsets)
+        np.save(run_dir / f"sort_idx_{tag}.npy", sort_idx)
+        if save_eigs and lam is not None:
+            np.save(run_dir / f"eigvals_Wsorted_{tag}.npy", lam)
 
     # plotting
-    c_max = float(np.abs(W_sorted).max()) if W_sorted.size else 1.0
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    if plot or save:
+        c_max = float(np.abs(W_sorted).max()) if W_sorted.size else 1.0
+        ncols = 3 if plot_eigs else 2
+        figsize = (14, 4) if plot_eigs else (10, 4)
+        fig, axes = plt.subplots(1, ncols, figsize=figsize)
 
-    ax = axes[0]
-    im = ax.imshow(
-        W_sorted, cmap="RdBu_r", vmin=-1.001 * c_max, vmax=+1.001 * c_max, aspect="auto"
-    )
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_ticks([-c_max, 0.0, c_max])
-    cbar.ax.set_yticklabels([f"{-c_max:.3f}", "0.000", f"{c_max:.3f}"])
-    ax.set_xlabel("Presynaptic (sorted)")
-    ax.set_ylabel("Postsynaptic (sorted)")
-    title_tag = "rolling" if use_rolling else "argmax"
-    ax.set_title(
-        f"W sorted ({title_tag}) — {wh_type}, {i_type}"
-        if wh_type and i_type
-        else f"W sorted ({title_tag})"
-    )
+        ax = axes[0]
+        im = ax.imshow(
+            W_sorted,
+            cmap="RdBu_r",
+            vmin=-1.001 * c_max,
+            vmax=+1.001 * c_max,
+            aspect="auto",
+            interpolation="nearest",
+        )
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_ticks([-c_max, 0.0, c_max])
+        cbar.ax.set_yticklabels([f"{-c_max:.3f}", "0.000", f"{c_max:.3f}"])
+        ax.set_xlabel("Presynaptic (sorted)")
+        ax.set_ylabel("Postsynaptic (sorted)")
+        ax.set_title(f"W sorted ({tag})")
 
-    ax = axes[1]
-    ax.plot(offsets, trace_vals, label="sum diag(W_sorted, k)")
-    ax.axhline(0.0, color="r", linestyle="--", linewidth=1)
-    ax.set_xlabel("Diagonal offset (k)")
-    ax.set_ylabel("Weight sum")
-    ax.set_title(f"Diagonal-offset trace ({title_tag})")
-    ax.legend()
+        ax = axes[1]
+        ax.plot(offsets, trace_vals, label="sum diag(W_sorted, k)")
+        ax.axhline(0.0, color="r", linestyle="--", linewidth=1)
+        ax.axvline(0.0, color="k", linestyle=":", linewidth=1)
+        ax.set_xlabel("Diagonal offset (k)")
+        ax.set_ylabel("Weight sum")
+        ax.set_title(f"Diagonal-offset trace ({tag})")
+        ax.legend()
 
-    plt.tight_layout()
-    plt.show()
+        if plot_eigs:
+            ax = axes[2]
+            ax.scatter(lam.real, lam.imag, s=10, alpha=0.8)
+            theta = np.linspace(0, 2 * np.pi, 512)
+            # unit circle (dashed) for reference
+            ax.plot(np.cos(theta), np.sin(theta), "k--", lw=1, alpha=0.4, label="|λ|=1")
+            # optional rho circle (dotted)
+            if rho_ref is not None:
+                ax.plot(
+                    float(rho_ref) * np.cos(theta),
+                    float(rho_ref) * np.sin(theta),
+                    "r:",
+                    lw=1,
+                    alpha=0.6,
+                    label=f"|λ|={rho_ref:g}",
+                )
+            ax.axhline(0, color="k", lw=0.5)
+            ax.axvline(0, color="k", lw=0.5)
+            ax.set_aspect("equal", adjustable="box")
+            ax.set_xlabel("Re(λ)")
+            ax.set_ylabel("Im(λ)")
+            sr = np.max(np.abs(lam)) if lam is not None and lam.size else float("nan")
+            ax.set_title(f"Eigenspectrum (ρ≈{sr:.3f})")
+            ax.legend(loc="lower right", fontsize=8)
+
+        plt.tight_layout()
+        out_name = f"weight_trace_{tag}{'_eigs' if plot_eigs else ''}.png"
+        if save:
+            fig.savefig(run_dir / out_name, dpi=200)
+        if plot:
+            plt.show()
+        else:
+            plt.close(fig)
+
     return offsets, trace_vals, sort_idx
+
+
+def weight_trace_mean_across_runs(
+    model_path: Union[str, Path],
+    use_rolling: bool = False,
+    plot: bool = True,
+    save_fig: bool = True,
+    save_npy: bool = True,
+    out_dir: Optional[Union[str, Path]] = None,
+    plot_trace: bool = True,
+    plot_eigs: bool = True,
+    show_cloud: bool = False,  # scatter all runs' eigenvalues faintly
+    rho_ref: Optional[float] = 1.0,  # draw |λ|=rho_ref circle if set
+):
+    """
+    Same behavior as before, plus returns (mean_W, summary) where `summary`
+    contains estimated band geometry useful for theoretical modeling:
+      - period_pixels
+      - d_inhib_pixels
+      - fwhm_pixels
+      - sigma_est
+      - peak_amp
+      - beta_like
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    def _local_maxima(y):
+        # indices of strict local maxima (ignore edges)
+        y = np.asarray(y)
+        i = np.arange(1, y.size - 1)
+        return i[(y[i] > y[i - 1]) & (y[i] > y[i + 1])]
+
+    def _local_minima(y):
+        y = np.asarray(y)
+        i = np.arange(1, y.size - 1)
+        return i[(y[i] < y[i - 1]) & (y[i] < y[i + 1])]
+
+    def _first_positive_peak_after_zero(offsets, trace):
+        # peak right of k=0 (robust-ish fallback to acf if needed)
+        k0 = int(np.argmin(np.abs(offsets)))
+        # local maxima to the right
+        pidx = _local_maxima(trace)
+        pidx = pidx[pidx > k0]
+        if pidx.size:
+            return pidx[0]
+        # fallback: first positive-lag peak of autocorrelation
+        t = trace - trace.mean()
+        ac = np.correlate(t, t, mode="full")
+        ac = ac[ac.size // 2 + 1 :]  # positive lags
+        # first local max in ac
+        i = _local_maxima(ac)
+        if i.size:
+            lag = i[0] + 1
+            # map lag to closest index in offsets to the right
+            tgt = offsets[k0] + lag
+            return int(np.argmin(np.abs(offsets - tgt)))
+        return None
+
+    def _fwhm(offsets, y):
+        # full width at half maximum around the central peak near k=0
+        y = np.asarray(y)
+        k0 = int(np.argmin(np.abs(offsets)))
+        # find local max near zero (allow small neighborhood)
+        neigh = slice(max(0, k0 - 3), min(y.size, k0 + 4))
+        k_peak_local = neigh.start + int(np.argmax(y[neigh]))
+        peak = float(y[k_peak_local])
+        if peak <= 0:
+            return np.nan, np.nan, np.nan
+        half = 0.5 * peak
+        # left crossing
+        kL = np.nan
+        for i in range(k_peak_local, 0, -1):
+            if y[i - 1] <= half <= y[i] or y[i] <= half <= y[i - 1]:
+                # linear interp
+                x1, x2 = offsets[i - 1], offsets[i]
+                y1, y2 = y[i - 1], y[i]
+                frac = (half - y1) / (y2 - y1 + 1e-12)
+                kL = x1 + frac * (x2 - x1)
+                break
+        # right crossing
+        kR = np.nan
+        for i in range(k_peak_local, y.size - 1):
+            if y[i] >= half >= y[i + 1] or y[i] <= half <= y[i + 1]:
+                x1, x2 = offsets[i], offsets[i + 1]
+                y1, y2 = y[i], y[i + 1]
+                frac = (half - y1) / (y2 - y1 + 1e-12)
+                kR = x1 + frac * (x2 - x1)
+                break
+        if np.isnan(kL) or np.isnan(kR):
+            return np.nan, np.nan, peak
+        return float(kR - kL), float(k_peak_local), peak
+
+    tag = "rolling" if use_rolling else "argmax"
+    run_dir = Path(model_path).parent  # .../multiruns/run_XX
+    cond_root = run_dir.parent  # .../multiruns
+    out_dir = Path(out_dir) if out_dir is not None else (cond_root / "analysis")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------- collect per-run W_sorted -------
+    Ws, run_names = [], []
+    for sub in sorted(cond_root.glob("run_*")):
+        fW = sub / f"W_sorted_{tag}.npy"
+        if fW.exists():
+            Ws.append(np.load(fW))
+            run_names.append(sub.name)
+        else:
+            print(f"[skip] no {fW.name} in {sub.name}")
+    if not Ws:
+        print(f"[warn] no W_sorted_{tag}.npy found under {cond_root}")
+        return None
+
+    Ws = np.asarray(Ws)  # (R, H, H)
+    mean_W = Ws.mean(axis=0)  # (H, H)
+    H = mean_W.shape[0]
+
+    # ------- diagonal-offset traces per run -> mean ± sd -------
+    offsets = np.arange(-(H - 1), H)
+    traces = np.empty((Ws.shape[0], offsets.size), dtype=float)
+    for r, W in enumerate(Ws):
+        traces[r] = np.array([np.trace(W, offset=k) for k in offsets])
+    trace_mean = traces.mean(axis=0)
+    trace_std = traces.std(axis=0)
+
+    # ------- geometry estimates from mean trace -------
+    # 1) period (distance to first side excitatory peak)
+    idx_side = _first_positive_peak_after_zero(offsets, trace_mean)
+    period_pixels = (
+        None
+        if idx_side is None
+        else float(abs(offsets[idx_side] - offsets[np.argmin(np.abs(offsets))]))
+    )
+
+    # 2) FWHM (and sigma from FWHM)
+    fwhm_pixels, k_peak_idx, peak_amp = _fwhm(offsets, trace_mean)
+    sigma_est = float(fwhm_pixels) / 2.355 if np.isfinite(fwhm_pixels) else np.nan
+
+    # 3) inhibitory location and strength between center and first side peak
+    d_inhib_pixels, beta_like = None, None
+    if idx_side is not None:
+        k0 = int(np.argmin(np.abs(offsets)))
+        seg = slice(k0 + 1, idx_side) if idx_side > k0 else slice(idx_side, k0)
+        if seg.stop - seg.start >= 3:
+            i_min = seg.start + int(np.argmin(trace_mean[seg]))
+            d_inhib_pixels = float(abs(offsets[i_min] - offsets[k0]))
+            trough = float(trace_mean[i_min])
+            if peak_amp and peak_amp > 0:
+                beta_like = float(abs(trough) / peak_amp)
+
+    summary = {
+        "period_pixels": period_pixels,  # spacing of excitatory ridges
+        "d_inhib_pixels": d_inhib_pixels,  # where inhibition peaks (≈ mid-gap)
+        "fwhm_pixels": float(fwhm_pixels) if np.isfinite(fwhm_pixels) else None,
+        "sigma_est": float(sigma_est) if np.isfinite(sigma_est) else None,
+        "peak_amp": float(peak_amp) if np.isfinite(peak_amp) else None,
+        "beta_like": float(beta_like) if beta_like is not None else None,
+    }
+
+    # ------- eigenspectrum (mean + optional cloud) -------
+    eig_mean = np.linalg.eigvals(mean_W)
+    eig_cloud = None
+    if show_cloud:
+        all_eigs = []
+        for sub in sorted(cond_root.glob("run_*")):
+            fe = sub / f"eigvals_Wsorted_{tag}.npy"
+            if fe.exists():
+                all_eigs.append(np.load(fe))
+            else:
+                fW = sub / f"W_sorted_{tag}.npy"
+                if fW.exists():
+                    all_eigs.append(np.linalg.eigvals(np.load(fW)))
+        if all_eigs:
+            eig_cloud = np.concatenate(all_eigs)
+
+    # ------- save arrays -------
+    if save_npy:
+        np.save(out_dir / f"W_sorted_mean_{tag}.npy", mean_W)
+        np.save(out_dir / f"offsets_{tag}.npy", offsets)
+        np.save(out_dir / f"trace_mean_{tag}.npy", trace_mean)
+        np.save(out_dir / f"trace_std_{tag}.npy", trace_std)
+        np.save(out_dir / f"eigvals_Wsorted_mean_{tag}.npy", eig_mean)
+        if show_cloud and eig_cloud is not None:
+            np.save(out_dir / f"eigvals_Wsorted_all_{tag}.npy", eig_cloud)
+        # also persist the summary estimates for convenience
+        with open(out_dir / f"geometry_summary_{tag}.txt", "w") as fh:
+            for k, v in summary.items():
+                fh.write(f"{k}: {v}\n")
+
+    # ------- plotting (same as before, optional) -------
+    ncols = 1 + int(plot_trace) + int(plot_eigs)
+    if plot or save_fig:
+        fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4))
+        if ncols == 1:
+            axes = [axes]
+
+        # (1) mean W_sorted
+        ax = axes[0]
+        vmax = float(np.abs(mean_W).max()) if mean_W.size else 1.0
+        im = ax.imshow(
+            mean_W,
+            cmap="RdBu_r",
+            vmin=-1.05 * vmax,
+            vmax=+1.05 * vmax,
+            interpolation="nearest",
+            aspect="equal",
+        )
+        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_ticks([-vmax, 0.0, vmax])
+        cbar.ax.set_yticklabels([f"{-vmax:.3f}", "0", f"{vmax:.3f}"])
+        ax.set_title(f"Mean W_sorted ({tag}) — {Ws.shape[0]} runs")
+        ax.set_xlabel("Presynaptic (sorted)")
+        ax.set_ylabel("Postsynaptic (sorted)")
+
+        col = 1
+
+        # (2) diagonal-offset trace (mean ± sd)
+        if plot_trace:
+            ax = axes[col]
+            ax.plot(offsets, trace_mean, label="mean trace")
+            ax.fill_between(
+                offsets,
+                trace_mean - trace_std,
+                trace_mean + trace_std,
+                alpha=0.2,
+                label="±1 sd",
+            )
+            ax.axhline(0.0, color="r", linestyle="--", linewidth=1)
+            ax.axvline(0.0, color="k", linestyle=":", linewidth=1)
+            # visualize the estimates
+            if summary["period_pixels"]:
+                ax.axvline(
+                    summary["period_pixels"],
+                    color="g",
+                    ls="--",
+                    lw=1,
+                    alpha=0.7,
+                    label="period",
+                )
+            if summary["d_inhib_pixels"]:
+                ax.axvline(
+                    summary["d_inhib_pixels"],
+                    color="purple",
+                    ls=":",
+                    lw=1,
+                    alpha=0.7,
+                    label="inhib pos",
+                )
+            ax.set_xlabel("Diagonal offset (k)")
+            ax.set_ylabel("Weight sum")
+            ax.set_title("Diagonal-offset trace (mean ± sd)")
+            ax.legend()
+            col += 1
+
+        # (3) eigenspectrum
+        if plot_eigs:
+            ax = axes[col]
+            if show_cloud and eig_cloud is not None:
+                ax.scatter(
+                    eig_cloud.real, eig_cloud.imag, s=4, alpha=0.12, label="runs"
+                )
+            ax.scatter(eig_mean.real, eig_mean.imag, s=10, alpha=0.9, label="mean(W)")
+            th = np.linspace(0, 2 * np.pi, 512)
+            ax.plot(np.cos(th), np.sin(th), "k--", lw=1, alpha=0.4, label="|λ|=1")
+            if rho_ref is not None:
+                rho = float(rho_ref)
+                ax.plot(
+                    rho * np.cos(th),
+                    rho * np.sin(th),
+                    "r:",
+                    lw=1,
+                    alpha=0.6,
+                    label=f"|λ|={rho:g}",
+                )
+            ax.axhline(0, color="k", lw=0.5)
+            ax.axvline(0, color="k", lw=0.5)
+            ax.set_aspect("equal", adjustable="box")
+            sr = np.max(np.abs(eig_mean)) if eig_mean.size else float("nan")
+            ax.set_title(f"Eigenspectrum mean(W) (ρ≈{sr:.3f})")
+            ax.set_xlabel("Re(λ)")
+            ax.set_ylabel("Im(λ)")
+            ax.legend(loc="lower right", fontsize=8)
+
+        plt.tight_layout()
+        if save_fig:
+            suffix = []
+            if plot_trace:
+                suffix.append("trace")
+            if plot_eigs:
+                suffix.append("eigs")
+            name = (
+                f"W_sorted_mean_{tag}"
+                + ("_" + "_".join(suffix) if suffix else "")
+                + ".png"
+            )
+            plt.savefig(out_dir / name, dpi=200)
+        if plot:
+            plt.show()
+        else:
+            plt.close(fig)
+
+    return mean_W, summary
 
 
 # -------------------

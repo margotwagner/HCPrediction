@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import time
+import math
 
 
 class ElmanRNN:
@@ -113,41 +114,40 @@ class ElmanRNN_pytorch_module_v2(nn.Module):
 
 class SymAsymRNN(nn.Module):
     """
-    Modification of ElmanRNN_pytorch_module_v2 where hidden-to-hidden weights are constrained as W = λ * S + (1 - λ) * A, with λ constrained to [0, 1]. S = Symmetric component, A = antisymmetric component
+    W = λ S + (1-λ) A, with λ ∈ [0,1] via sigmoid(lambda_raw).
     """
 
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim, output_dim, init_lambda: float = 0.5):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
 
-        # store symmetric + antisymmetric bases
+        # symmetric + antisymmetric bases
         self.S = nn.Parameter(torch.empty(hidden_dim, hidden_dim))
         self.A = nn.Parameter(torch.empty(hidden_dim, hidden_dim))
         nn.init.orthogonal_(self.S)
         nn.init.orthogonal_(self.A)
 
-        # unconstrained raw param
-        # self.lambda_raw = nn.Parameter(torch.tensor(0.0))  # sigmoid(0) = 0.5
-        # self.lambda_raw = nn.Parameter(torch.tensor(1.0986))  # 0.75
-        self.lambda_raw = nn.Parameter(torch.tensor(-1.0986))  # 0.25
+        # set λ(0) = init_lambda via logit
+        lam0 = float(init_lambda)
+        lam0 = min(max(lam0, 1e-6), 1.0 - 1e-6)  # clamp away from {0,1}
+        logit = math.log(lam0 / (1.0 - lam0))
+        self.lambda_raw = nn.Parameter(torch.tensor(logit, dtype=torch.float32))
 
-        # input/output modules
+        # input/output
         self.input_linear = nn.Linear(input_dim, hidden_dim)
         self.linear = nn.Linear(hidden_dim, output_dim)
 
-        # add dummy attributes so Main_s4.py still works unchanged
-        self.rnn = None  # prevents AttributeErrors in fixi block
-        self.act = nn.Softmax(2)  # output nonlinearity (overridden in Main_s4.py)
-        self.tanh = torch.tanh  # recurrent nonlinearity (overridable in Main_s4.py)
+        # keep these for Main_s4 compatibility
+        self.rnn = None
+        self.act = nn.Softmax(2)
+        self.tanh = torch.tanh
 
     def effective_lambda(self):
-        # bounds λ to [0, 1]
-        return torch.sigmoid(self.lambda_raw)  # in (0,1)
+        return torch.sigmoid(self.lambda_raw)
 
     def effective_W(self):
-        # λS + (1-λ)A, force symmetry/antisymmetry structure
         S_sym = 0.5 * (self.S + self.S.T)
         A_asym = 0.5 * (self.A - self.A.T)
         lam = self.effective_lambda()
@@ -158,16 +158,12 @@ class SymAsymRNN(nn.Module):
         T = x.size(1)
         h = h0[0] if h0.ndim == 3 else h0
         outputs, hiddens = [], []
-
         for t in range(T):
             h = self.tanh(self.input_linear(x[:, t, :]) + h @ W.T)
             y = self.act(self.linear(h))
             outputs.append(y)
             hiddens.append(h)
-
-        out = torch.stack(outputs, dim=1)
-        z = torch.stack(hiddens, dim=1)
-        return out, z
+        return torch.stack(outputs, 1), torch.stack(hiddens, 1)
 
 
 class ElmanRNN(nn.Module):

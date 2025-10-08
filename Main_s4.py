@@ -1,8 +1,11 @@
 """
-Mini-batch based training:
-    Default AE
-    For Localization test
-    For remap test
+Mini-batch based training script (commented)
+- Supports: Default AE, Localization test, Remap test
+- Modernized/minibatch trainer with rich logging/metrics and reproducibility controls
+
+
+This annotated version preserves behavior while adding explanatory comments,
+section headers, and docstrings for clarity.
 """
 
 import argparse, sys, os, time
@@ -10,16 +13,14 @@ import random, json, platform
 from datetime import datetime
 from tqdm import tqdm
 import numpy as np
-from numpy.linalg import eig
-from scipy.stats import norm
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from RNN_Class import *
+from pathlib import Path
 
 
 parser = argparse.ArgumentParser(description="PyTorch BPTT Training")
@@ -33,7 +34,7 @@ parser.add_argument(
     "--batch-size", default=200, type=int, help="mini-batch size (default: 200)"
 )
 parser.add_argument(
-    "-a", "--adam", default=0, type=int, help="whether to use ADAM or not (default: 0)"
+    "-a", "--adam", default=0, type=int, help="Enable to use ADAM (default: 0)"
 )
 parser.add_argument(
     "--lr",
@@ -43,104 +44,138 @@ parser.add_argument(
     metavar="LR",
     help="initial learning rate (default:0.01)",
 )
-parser.add_argument("--lr_step", default="", type=str, help="decreasing strategy")
+parser.add_argument(
+    "--lr_step",
+    default="",
+    type=str,
+    help="decreasing strategy: comma-separated epochs to halve LR (e.g. '2000,4000')",
+)
 parser.add_argument(
     "-p",
     "--print-freq",
     default=1000,
     type=int,
     metavar="N",
-    help="print frequency (default: 1000)",
+    help="print frequency (default: 1000) for logging/metrics snapshots",
 )
 parser.add_argument(
     "-g",
     "--gpu",
     default=1,
     type=int,
-    help="whether enable GPU computing (default:1), if more than one GPU, number indicates GPU device",
+    help="whether enable GPU computing (default:1). \n 0:CPU, 1:default GPU, >1:specify GPU id",
 )
 parser.add_argument(
     "--hidden-n", default=200, type=int, help="Hidden dimension size(default:200)"
 )
 parser.add_argument(
-    "--savename", default="net", type=str, help="Default output saving name"
+    "--savename",
+    default="net",
+    type=str,
+    help="Basepath for output artifacts (without extension)",
 )
 parser.add_argument(
     "--output_dir",
     default="Elman_SGD/Remap_predloss/N100T100",
     type=str,
-    help="Directory to save training information to",
+    help="Directory to save per-epoch weight snapshots/metrics",
 )
 parser.add_argument(
     "--partial",
     default=0,
     type=float,
-    help="sparsity level (0-1) amount of the partially trained parameter",
+    help="(unused here) sparsity level for partially trained parameters",
 )
 parser.add_argument(
     "--sparsity",
     default=0,
     type=float,
-    help="Percentage of active cells in the input layer",
+    help="(unused here) percentage of active input cells",
 )
 parser.add_argument(
-    "--input", default="", type=str, help="Load in user defined input sequence"
+    "--input",
+    default="",
+    type=str,
+    help="Path to a torch file with {'X_mini','Target_mini'} tensors",
 )
 parser.add_argument(
-    "--ae", default=0, type=int, help="whether target = input (default=0)"
+    "--ae",
+    default=0,
+    type=int,
+    help="If 1, set target=inputs (default:0). Use for testing.",
 )
 parser.add_argument(
     "--net",
     default="ConvRNN",
     type=str,
-    help="Name of the network class (default: ConvRNN)",
+    help="Name of the network class to instantiate (default: ConvRNN)",
 )
 parser.add_argument(
-    "--act", default="sigmoid", type=str, help="Activation of output (default: sigmoid)"
+    "--act",
+    default="sigmoid",
+    type=str,
+    help="Output activation ovverride: 'sigmoid' or 'tanh' (default: sigmoid))",
 )
 parser.add_argument(
-    "--rnn_act", default="", type=str, help="Activation of rnn units (default: tanh)"
+    "--rnn_act",
+    default="",
+    type=str,
+    help="RNN hidden activation override: 'sigmoid' or 'relu' (default: tanh)",
 )
 parser.add_argument(
-    "--pred", default=0, type=int, help="Prediction horizon (default:0)"
+    "--pred",
+    default=0,
+    type=int,
+    help="Prediction horizon k (trim X,Y for k-step-ahead prediction)",
 )
 parser.add_argument(
-    "--resume", default="", type=str, help="path to latest checkpoint (default: none)"
+    "--resume",
+    default="",
+    type=str,
+    help="Path to checkpoint (.pth.tar) to resume model weights",
 )
 parser.add_argument(
     "--Hregularized_l1",
     default=0,
     type=float,
-    help="penalty for hidden unit firing (l1 regularized)",
+    help="L1 penalty coefficient on hidden states",
 )
 parser.add_argument(
     "--Hregularized",
     default=0,
     type=float,
-    help="penalty for hidden unit firing (l2 regularized)",
+    help="L2 penalty coefficient on hidden states",
 )
-parser.add_argument("--fixi", default=0, type=int, help="whether fix the input matrix")
 parser.add_argument(
-    "--clip", default=0, type=float, help="whether to clip gradient or not"
+    "--fixi",
+    default=0,
+    type=int,
+    help="If 1, freeze input mapping to identity (weight & bias)",
+)
+parser.add_argument(
+    "--clip", default=0, type=float, help="If >0, clip gradient norm to this value"
 )
 parser.add_argument(
     "--hidden_init",
     type=str,
     default=None,
-    help="Path to a .npy file containing a hidden weight matrix. If None, use default PyTorch initialization (He)",
+    help="Path to .npy (H, H) hidden weight matrix. If None, use Pytorch init.",
 )
 parser.add_argument(
-    "--early_stop", default=0, type=int, help="whether to include early stopping"
+    "--early_stop", default=0, type=int, help="Enable simple early stopping if nonzero"
 )
 parser.add_argument("--seed", type=int, default=1337, help="Global RNG seed")
 parser.add_argument(
     "--deterministic",
     type=int,
     default=1,
-    help="Deterministic CUDA/cuDNN (may be slower)",
+    help="Use deterministic CUDA/cuDNN (may be slower)",
 )
 parser.add_argument(
-    "--run_tag", type=str, default="", help="Optional run tag for bookkeeping"
+    "--run_tag",
+    type=str,
+    default="",
+    help="Optional run tag inserted into output paths (via lambda tag helper)",
 )
 parser.add_argument(
     "--whh_type",
@@ -158,39 +193,59 @@ parser.add_argument(
         "shiftcyctridiag",
         "shiftmh",
         "shifttridiag",
+        "learned",
     ],
-    help="Hidden-weight init type (default: baseline)",
+    help="Family of hidden-weight initializations (default: baseline)",
 )
 parser.add_argument(
     "--whh_norm",
     default="none",
     choices=["frobenius", "spectral", "variance", "none"],
-    help="Normalization strategy for hidden weight (ignored for baseline).",
+    help="Normalization strategy for selected hidden initializations (default: none)",
+)
+parser.add_argument(
+    "--lambda0",
+    type=float,
+    default=0.5,
+    help="Initial value for λ in [0,1] for SymAsymRNN (weighting of S vs A) (default 0.5).",
 )
 
 
 def main():
     global args
-
     args = parser.parse_args()
+
+    # Resolve default hidden init path (based on type/norm) unless explicitly given
     args.hidden_init = _resolve_hidden_init_path(args)
     print(f"[whh] type={args.whh_type} norm={args.whh_norm} -> {args.hidden_init}")
+
+    # If lambda0 is used, inject a tag into directory/savename for bookkeeping
+    lam_tag = _lambda_tag_from_args(args)
+    if lam_tag is not None:
+        args.output_dir = _inject_lambda_dir(args.output_dir, lam_tag)
+        args.savename = _inject_lambda_dir(args.savename, lam_tag)
+
     lr = args.lr
     n_epochs = args.epochs
-    RecordEp = args.print_freq
+    RecordEp = args.print_freq  # snapshot cadence
+
+    # Reproducibility
     set_seed(args.seed, bool(args.deterministic))
 
+    # I/O setup
     global f
     savedir = args.savename.split("/")[:-1]
     savedir = "/".join(savedir)
     os.makedirs(savedir, exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
     print(args.output_dir)
+
+    # Log system info and settings
     f = open(args.savename + ".txt", "w")
     print("Settings:", file=f)
     print(str(sys.argv), file=f)
 
-    # add metadata
+    # Persist metadata for reproducibility/debugging
     meta = {
         "argv": sys.argv,
         "args": vars(args),
@@ -199,13 +254,24 @@ def main():
     print("META:", file=f)
     print(json.dumps(meta, indent=2), file=f)
 
+    # ------------------
+    # Load input tensors
+    # ------------------
     if args.input:
         loaded = torch.load(args.input)
         X = loaded["X_mini"]
         Y = loaded["Target_mini"]
+    else:
+        raise ValueError(
+            "--input is required and must point to a file with X_mini and Target_mini"
+        )
+
+    # Autoencoder: target == input (used for testing)
     if args.ae:
         print("Target=Input", file=f)
         Y = loaded["X_mini"]
+
+    # k-step prediction: shift/trim X,Y accordingly
     if args.pred:
         X = X[
             :,
@@ -216,9 +282,18 @@ def main():
             args.pred :,
         ]
 
-    ##  define network module
-    D = X.shape[-1]
-    net = eval(args.net)(D, args.hidden_n, D)
+    # ---------------------
+    # Build the network
+    # ---------------------
+    D = X.shape[-1]  # input/output dimensionality
+    if args.net == "SymAsymRNN":
+        net = SymAsymRNN(D, args.hidden_n, D, init_lambda=args.lambda0)
+    else:
+        net = eval(args.net)(
+            D, args.hidden_n, D
+        )  # instantiate class by name from RNN_class
+
+    # Output activation override
     if args.act == "sigmoid":
         net.act = nn.Sigmoid()
         print("output nonlinearity: elementwise sigmoid", file=f)
@@ -226,6 +301,7 @@ def main():
         net.act = nn.Tanh()
         print("output nonlinearity: elementwise tanh", file=f)
 
+    # RNN hidden activation override (defaults to tanh in most modules)
     if args.rnn_act == "sigmoid":
         net.tanh = nn.Sigmoid()
         print("RNN nonlinearity: elementwise sigmoid", file=f)
@@ -235,6 +311,7 @@ def main():
     else:
         print("RNN nonlinearity: elementwise tanh", file=f)
 
+    # Optionally freeze input mapping to identity (for certain experiments)
     if args.fixi:
         for name, p in net.named_parameters():
             if name == "input_linear.weight" or name == "rnn.weight_ih_l0":
@@ -247,12 +324,17 @@ def main():
                 p.data.fill_(0)
                 print("Fixing input bias to 0", file=f)
 
+    # Initial hidden state shape expected by modules: (num_layers=1, batch_size, hidden_n)
     h0 = torch.zeros((1, args.batch_size, args.hidden_n))
 
-    ## MSE criteria
+    # ---------------
+    # Loss function
+    # ---------------
     criterion = nn.MSELoss(reduction="mean")
 
-    ##  load checkpoint and resume training
+    # -----------------------------
+    # Optional resume from checkpoint
+    # -----------------------------
     if args.resume:
         if os.path.isfile(args.resume):
             print("=> loading previous network '{}'".format(args.resume), file=f)
@@ -261,7 +343,9 @@ def main():
         else:
             print("=> no checkpoint found at '{}'".format(args.resume), file=f)
 
-    ## enable GPU computing
+    # -----------------
+    # Device placement
+    # -----------------
     if args.gpu == 1:
         print("Cuda device availability: {}".format(torch.cuda.is_available()), file=f)
         criterion = criterion.cuda()
@@ -277,13 +361,17 @@ def main():
         h0 = h0.cuda(args.gpu - 1)
         Y = Y.cuda(args.gpu - 1)
 
-    # construct optimizer
+    # --------------
+    # Optimizer setup
+    # --------------
     optimizer = torch.optim.SGD(net.parameters(), lr=lr)
     if args.adam:
         print("Using ADAM optimizer", file=f)
         optimizer = torch.optim.Adam(net.parameters(), lr=lr)
 
-    # start training or step-wise training
+    # -------------------
+    # Hidden init loading
+    # -------------------
     start = time.time()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.hidden_init is not None:
@@ -296,6 +384,10 @@ def main():
         )
     else:
         print("Using standard PyTorch initialization for hidden weights")
+
+    # -----------------
+    # Train the model
+    # -----------------
     (
         net,
         loss_list,
@@ -311,7 +403,9 @@ def main():
     deltat = end - start
     print("Total training time: {0:.1f} minuetes".format(deltat / 60), file=f)
 
-    # basic model config
+    # -------------------------
+    # Save artifacts & metadata
+    # -------------------------
     model_cfg = {
         "arch": args.net,
         "input_dim": int(X.shape[-1]),
@@ -319,8 +413,8 @@ def main():
         "output_dim": int(Y.shape[-1]),
     }
 
-    # seed info for closed-loop
-    warmup_context = X[:, :30].detach().cpu()  # first 30 steps, adjust length if needed
+    # Closed-loop seeds for later evaluation
+    warmup_context = X[:, :30].detach().cpu()  # first 30 steps
     h0_eval = h0.detach().cpu()
 
     # save network input, state
@@ -339,17 +433,20 @@ def main():
     }
     torch.save(save_dict, args.savename + ".pth.tar")
 
-    # save metadata
+    # mirror CLI/env metadata
     with open(args.savename + ".meta.json", "w") as mf:
         json.dump(meta, mf, indent=2)
 
-    # plot loss function iteration curve
+    # Plot loss curve
     plt.figure()
     plt.plot(loss_list)
     plt.title("Loss iteration")
     plt.savefig(args.savename + ".png")
 
 
+# --------------------------------------------------------
+# Utilities: norms, logging, weight-loading, reproducibility
+# --------------------------------------------------------
 def total_grad_norm(params, norm_type=2.0):
     """Compute total grad norm (like clip_grad_norm_ returns, but without clipping)."""
     grads = [p.grad for p in params if p.grad is not None]
@@ -425,14 +522,14 @@ def train_minibatch(
     epoch, stop = 0, 0
     prev_grad_stats = None
 
-    # respect existing clip flag if provided externally via args
+    # prefer external clip flag if provided; else pull from args
     if use_clip is None:
         try:
             use_clip = args.clip
         except NameError:
             use_clip = None
 
-    # save initial hidden weights for "drift from init" measurement
+    # Save initial hidden weights to measure drift later
     if isinstance(net, SymAsymRNN):
         init_hidden = net.effective_W().detach().cpu().clone()
     elif "pytorch" in args.net:
@@ -440,6 +537,7 @@ def train_minibatch(
     else:
         init_hidden = net.hidden_linear.weight.detach().cpu().clone()
 
+    # RNG snapshots for reproducibility
     rng_init = {
         "py_random": random.getstate(),
         "np_random": np.random.get_state(),
@@ -454,10 +552,12 @@ def train_minibatch(
             return 0
         return min(max(0, requested_idx), n_batches - 1)
 
-    # main training loop with tqdm progress bar
+    # -----------------------
+    # Epoch loop with tqdm bar
+    # -----------------------
     with tqdm(total=n_epochs, desc="Training", unit="epoch") as pbar:
         while stop == 0 and epoch < n_epochs:
-            # optional learning-rate step decay
+            # Pptional LR schedule (halve LR at listed epochs)
             if args.lr_step:
                 lr_step = list(map(int, args.lr_step.split(",")))
                 if epoch in lr_step:
@@ -465,17 +565,18 @@ def train_minibatch(
                     for param_group in optimizer.param_groups:
                         param_group["lr"] *= 0.5
 
-            optimizer.zero_grad()  # Clears existing gradients from previous epoch
+            optimizer.zero_grad()
             batch_losses = []
             grad_norm_for_record = None
             y_hat_record = h_t_record = Xmini_record = Ymini_record = None
 
             num_batches = int(np.ceil(N / args.batch_size))
             bs = args.batch_size
-
-            # compute a safe snapshot batch index for this epoch
             safe_b = _safe_sample_batch_idx(sample_batch_idx, num_batches)
 
+            # -----------
+            # Batch loop
+            # -----------
             for b in range(num_batches):
                 start_idx = b * bs
                 end_idx = min((b + 1) * bs, N)
@@ -485,7 +586,7 @@ def train_minibatch(
                 # forward pass
                 output, h_t = net(X_mini, h0)
 
-                # loss: prediction + hidden regularizers
+                # Loss = prediction + hidden regularizers
                 loss1 = criterion(output, Y_mini)
                 loss2 = lamda * criterion(
                     h_t, torch.zeros(h_t.shape).to(X_mini.device)
@@ -493,29 +594,26 @@ def train_minibatch(
                     h_t, torch.zeros(h_t.shape).to(X_mini.device)
                 )
                 loss = loss1 + loss2
-                loss.backward()  # Does backpropagation and calculates gradients
+                loss.backward()
 
-                # compute grad norm before clipping
+                # Grad norm before clipping (for logging)
                 gn = _total_grad_norm(net.parameters(), p=2.0)
 
-                # record on recording epochs and first epoch from safe batch
+                # Snapshot once per record epoch on a chosen batch
                 if ((epoch % RecordEp) == 0 or epoch == 0) and (b == safe_b):
                     prev_grad_stats = record_grads(
                         net, grad_list, prev_stats=prev_grad_stats
                     )
-                    # optional: quick health log
                     print(
                         f"[grad] epoch={epoch} batch={b}/{num_batches-1} norm={float(gn):.4f}"
                     )
-
-                    # stash aligned snapshot bits
                     grad_norm_for_record = gn
                     y_hat_record = output.detach().cpu()
                     h_t_record = h_t.detach().cpu()
                     Xmini_record = X_mini.detach().cpu()
                     Ymini_record = Y_mini.detach().cpu()
 
-                # optional gradient clipping
+                # Optional gradient clipping
                 if use_clip:
                     torch.nn.utils.clip_grad_norm_(net.parameters(), args.clip)
 
@@ -524,24 +622,20 @@ def train_minibatch(
 
                 batch_losses.append(loss.item())
 
-            # epoch-end bookkeeping
+            # End-epoch bookkeeping
             epoch_loss = float(np.mean(batch_losses)) if batch_losses else float("nan")
             loss_list.append(epoch_loss)
-
-            # tqdm: update progress bar and set loss in postfix
             pbar.set_postfix({"loss": epoch_loss})
             pbar.update(1)
 
-            # early stopping
-            if args.early_stop == 0:
-                tolerance = -1.0  # impossible tolerence to remove
-            else:
-                tolerance = 1e-7
-            if epoch > 1000 and all(np.abs(np.diff(loss_list[-10:])) < tolerance):
+            # Simple early stopping (plateau detection)
+            tolerance = -1.0 if args.early_stop == 0 else 1e-7
+            if epoch > 100 and all(np.abs(np.diff(loss_list[-10:])) < tolerance):
                 stop = 1
                 print("Hit the stopping criterion < 1e-7", file=f)
+
+            # Record snapshots/metrics on cadence
             if epoch % RecordEp == 0:
-                # save IO/hidden snapshots for analysis
                 if y_hat_record is not None:
                     history["epoch"].append(epoch)
                     history["y_hat"].append(y_hat_record)
@@ -551,7 +645,7 @@ def train_minibatch(
                     history["loss"].append(epoch_loss)
                     history["grad_norm"].append(grad_norm_for_record)
 
-                # hidden weight analysis
+                # Extract hidden weight matrix for analysis/saving
                 if isinstance(net, SymAsymRNN):
                     Wh = net.effective_W().detach().cpu()
                 elif "pytorch" in args.net:
@@ -559,36 +653,18 @@ def train_minibatch(
                 else:
                     Wh = net.hidden_linear.weight.detach().cpu()
 
-                # COMMENTING OUT EXPENSIVE CALCULATIONS -- CAN DO OFFLINE
-                # drift = _frob(Wh - init_hidden)
-                # frob_norm = _frob(Wh)
-                # rho = _spectral_radius(Wh)
-                # orth_err = None
-
-                # if Wh.shape[0] == Wh.shape[1]:
-                #    I = torch.eye(Wh.shape[0])
-                #    orth_err = _frob(Wh.T @ Wh - I)  # orthogonality error
-
-                # hidden activation stats on current minibatch
+                # Hidden activation stats on current minibatch
                 with torch.no_grad():
                     out_dbg, h_dbg = net(X_mini, h0)
                     act_mean = float(h_dbg.mean().item())
                     act_std = float(h_dbg.std().item())
                     tanh_sat = float((h_dbg.abs() > 0.99).float().mean().item())
-                    # s, _, _ = torch.svd(Wh)
-                    # s_max = float(s.max().item())
-                    # s_min = float(s.min().item()) if s.numel() > 0 else float("nan")
-                    # cond = float(s_max / (s_min + 1e-12))
-
-                    # Hidden weight aggregates
-                    # max_abs_w = float(Wh.abs().max().item())
-                    # sparsity_w = float((Wh.abs() < 1e-8).float().mean().item())
 
                 # Batch-loss dispersion within this epoch
                 loss_mean = float(np.mean(batch_losses))
                 loss_std = float(np.std(batch_losses))
 
-                # save raw hidden matrix for offline analysis
+                # Save raw hidden matrix for offline analysis
                 os.makedirs(args.output_dir, exist_ok=True)
                 fname = os.path.join(args.output_dir, f"Wh_epoch{epoch:06d}.pt")
                 torch.save(Wh, fname)
@@ -599,15 +675,6 @@ def train_minibatch(
                         "loss": epoch_loss,
                         "loss_batch_mean": loss_mean,
                         "loss_batch_std": loss_std,
-                        # "frob": frob_norm,
-                        # "drift_from_init": drift,
-                        # "spectral_radius": rho,
-                        # "spectral_norm": s_max,
-                        # "min_singular": s_min,
-                        # "cond_num": cond,
-                        # "orth_err": orth_err,
-                        # "w_max_abs": max_abs_w,
-                        # "w_sparsity": sparsity_w,
                         "act_mean": act_mean,
                         "act_std": act_std,
                         "tanh_sat": tanh_sat,
@@ -634,6 +701,7 @@ def train_minibatch(
     return net, loss_list, history, grad_list, metrics, rng_init, init_hidden
 
 
+# Small helpers ---------------------------------------------------------------
 def _total_grad_norm(params, p=2.0):
     """
     Compute the total gradient norm (default L2) across all parameters.
@@ -916,6 +984,32 @@ def _resolve_hidden_init_path(args) -> str:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Hidden-weight init not found: {path}")
     return path
+
+
+def _lambda_tag_from_args(args) -> str:
+    """Return 'lambda0pXX' or None if args.lambda0 is None."""
+    if args.lambda0 is None:
+        return None
+    pct = int(round(float(args.lambda0) * 100.0))
+    return f"lambda0p{pct:02d}"
+
+
+def _inject_lambda_dir(path: str, lam_tag) -> str:
+    """Insert lam_tag as a path component (after N100T100 if present). No-op if None or already present."""
+    if not lam_tag or not path:
+        return path
+    if lam_tag in path:
+        return path
+
+    p = Path(path)
+    parts = list(p.parts)
+    try:
+        i = parts.index("N100T100") + 1
+        new_parts = parts[:i] + [lam_tag] + parts[i:]
+        return str(Path(*new_parts))
+    except ValueError:
+        # 'N100T100' not in path; just prefix
+        return str(Path(lam_tag) / p)
 
 
 if __name__ == "__main__":

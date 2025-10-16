@@ -444,7 +444,15 @@ def main():
     # Train and time it
     # ----------------------
     start = time.time()
-    net, loss_list, grad_list, hidden, y_hat, snapshot_epochs = train_partial(
+    (
+        net,
+        loss_list,
+        grad_list,
+        hidden,
+        y_hat,
+        snapshot_epochs,
+        grad_metrics_history,
+    ) = train_partial(
         X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, Mask
     )
     end = time.time()
@@ -470,6 +478,28 @@ def main():
         "Target_mini": Target_mini.cpu(),  # targets (for analysis)
         "loss": loss_list,  # scalar training loss per epoch
         "mean_squared_grads": grad_list,  # simple grad stats list per epoch
+        "grad_metrics": {
+            "history": grad_metrics_history,
+            # Quick series for easy plotting without unpacking:
+            "global_L2_pre": [h["pre"]["global"]["L2"] for h in grad_metrics_history],
+            "global_L2_post": [h["post"]["global"]["L2"] for h in grad_metrics_history],
+            "global_RMS_pre": [h["pre"]["global"]["RMS"] for h in grad_metrics_history],
+            "global_RMS_post": [
+                h["post"]["global"]["RMS"] for h in grad_metrics_history
+            ],
+            # Parameter names & shapes (take from first epoch that had grads):
+            "param_names": list(grad_metrics_history[0]["post"]["groups"].keys())
+            if len(grad_metrics_history) > 0
+            else [],
+            "param_shapes": {
+                k: v["shape"]
+                for k, v in (
+                    grad_metrics_history[0]["post"]["groups"].items()
+                    if len(grad_metrics_history) > 0
+                    else {}
+                ).items()
+            },
+        },
         "n_epochs": int(n_epochs),
         "args": vars(args),  #  (CLI config)
         "env": env_report(),  #  (versions/flags)
@@ -524,7 +554,8 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
 
     hidden_rep = []  # periodic hidden state snapshots
     output_rep = []  # periodic output snapshots
-    grad_list = []  # per-epoch gradient stats
+    grad_list = []  # mean(grad^2) per param group each snapshot
+    grad_metrics_history = []  # detailed grad metrics per snapshot
     snapshot_epochs = []  # epochs at which snapshots were taken
 
     with tqdm(total=n_epochs, desc="Progress", unit="epoch") as pbar:
@@ -558,6 +589,9 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
             loss = criterion(output, Target)
             loss.backward()
 
+            # --- Gradient metrics (PRE-CLIP / PRE-MASK) ---
+            grad_metrics_pre = _compute_grad_metrics(net)
+
             # Record simple grad statistics (mean of squared gradients per param)
             tmp = []
             for name, p in net.named_parameters():
@@ -578,6 +612,24 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
             # Optional gradient norm clipping (global norm)
             if args.clamp_norm:
                 torch.nn.utils.clip_grad_norm_(net.parameters(), args.clamp_norm)
+
+            # --- Gradient metrics (POST-CLIP / POST-MASK) ---
+            grad_metrics_post = _compute_grad_metrics(net)
+
+            grad_metrics_history.append(
+                {
+                    "epoch": int(epoch),
+                    "pre": grad_metrics_pre,  # global + per-parameter
+                    "post": grad_metrics_post,  # global + per-parameter
+                    "clipped": bool(
+                        args.clamp_norm
+                        and (
+                            grad_metrics_post["global"]["L2"]
+                            < grad_metrics_pre["global"]["L2"]
+                        )
+                    ),
+                }
+            )
 
             optimizer.step()  # Update parameters
 
@@ -628,7 +680,15 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
                     )
                 )
 
-    return net, loss_list, grad_list, hidden_rep, output_rep, snapshot_epochs
+    return (
+        net,
+        loss_list,
+        grad_list,
+        hidden_rep,
+        output_rep,
+        snapshot_epochs,
+        grad_metrics_history,
+    )
 
 
 # ------------------
@@ -741,6 +801,43 @@ def _load_hidden_into_elman(
         # ElmanRNN_pytorch_module_v2 uses nn.RNN => weight_hh_l0 exists
         net.rnn.weight_hh_l0.copy_(thW)
         # keep biases as-is (minimal & straightforward)
+
+
+def _compute_grad_metrics(net: nn.Module):
+    """
+    Returns a dict with global and per-parameter gradient metrics.
+    Assumes .backward() has been called. Reads current .grad tensors.
+    """
+    total_sq = 0.0
+    total_n = 0
+    groups = {}  # name -> {'L2':..., 'RMS':..., 'n':..., 'shape':...}
+
+    for name, p in net.named_parameters():
+        if not p.requires_grad or p.grad is None:
+            continue
+        g = p.grad.detach()
+        sq = float(torch.sum(g * g).item())
+        n = g.numel()
+        # L2 = sqrt(sum g^2); RMS = sqrt(mean g^2)
+        L2 = float(torch.sqrt(torch.sum(g * g)).item())
+        RMS = float((sq / max(n, 1)) ** 0.5)
+
+        groups[name] = {
+            "L2": L2,
+            "RMS": RMS,
+            "n": int(n),
+            "shape": tuple(p.shape),
+        }
+        total_sq += sq
+        total_n += n
+
+    global_L2 = float((total_sq**0.5))
+    global_RMS = float(((total_sq / max(total_n, 1)) ** 0.5))
+
+    return {
+        "global": {"L2": global_L2, "RMS": global_RMS, "n": int(total_n)},
+        "groups": groups,
+    }
 
 
 if __name__ == "__main__":

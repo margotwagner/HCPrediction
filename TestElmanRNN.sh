@@ -1,1 +1,0 @@
-python Main_clean.py --input data/Ns200_SeqN100_2.pth.tar --epoch 50000 -p 5000 --ae 1 --fixi 2 --fixo 2 --pred 1 --hidden-n 500 --rnn_act relu --ac_output sigmoid

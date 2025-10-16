@@ -26,6 +26,7 @@ import torch.nn as nn
 from RNN_Class import *
 from tqdm import tqdm
 import random
+from typing import Optional
 
 
 parser = argparse.ArgumentParser(description="PyTorch Elman BPTT Training")
@@ -190,6 +191,18 @@ parser.add_argument(
     default=None,
     help="Symmetry percent in [0,1]. Needed for shifted/shift variants; ignored for cent/cent-cyc/identity",
 )
+parser.add_argument(
+    "--out_root",
+    type=str,
+    default="./runs",
+    help="Root directory for outputs; subfolders mirror hidden-weight init structure",
+)
+parser.add_argument(
+    "--run_tag",
+    type=str,
+    default="",
+    help="Optional extra tag appended to filename (e.g., seed or note)",
+)
 
 
 def main():
@@ -249,6 +262,41 @@ def main():
     else:
         print("[whh] using default random init", file=f)
 
+    # Auto-build savename if not provided, mirroring init structure
+
+    if not args.savename:
+        if args.whh_type == "none":
+            # No override: keep it simple but structured
+            out_dir = os.path.join(args.out_root, "ElmanRNN", "random-init")
+            prefix = _prefix_from_type("none")  # "random"
+            norm_short = "pytorch"
+            fname_bits = [f"{prefix}_n{hidden_N}_{norm_short}"]
+        else:
+            variant = _resolve_variant(args.whh_type)
+            norm_dir = args.whh_norm
+            out_dir = os.path.join(
+                args.out_root, "ElmanRNN", variant, args.whh_type, norm_dir
+            )
+            if (
+                args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
+                and args.alpha is not None
+            ):
+                out_dir = os.path.join(out_dir, _alpha_tag(args.alpha))
+            prefix = _prefix_from_type(args.whh_type)
+            norm_short = _norm_shortname(args.whh_norm)
+            fname_bits = [f"{prefix}_n{hidden_N}_{norm_short}"]
+            if (
+                args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
+                and args.alpha is not None
+            ):
+                fname_bits.append(_alpha_tag(args.alpha))
+
+    if args.run_tag:
+        fname_bits.append(str(args.run_tag))
+    # make folder and set savename base (no extension)
+    os.makedirs(out_dir, exist_ok=True)
+    args.savename = os.path.join(out_dir, "_".join(fname_bits))
+
     # Optionally change the RNN hidden nonlinearity
     if args.rnn_act == "relu":
         net.rnn = nn.RNN(N, hidden_N, 1, batch_first=True, nonlinearity="relu")
@@ -302,8 +350,7 @@ def main():
                     p.data = torch.ones(p.shape) / (p.shape[0] * p.shape[1])
                     print("Fixing {} to positive constant".format(name), file=f)
                 elif args.fixo == 2:
-                    # Zero-symmetric init
-                    print("Fixing {} to zero symmetric initiation".format(name), file=f)
+                    print("Fixing {} to initialization".format(name), file=f)
                 elif args.fixo == 3:
                     p.data = p.data + torch.abs(p.data)
                     print("Fixing {} to positive initiation".format(name), file=f)
@@ -422,11 +469,11 @@ def main():
         "X_mini": X_mini.cpu(),  # inputs (for analysis)
         "Target_mini": Target_mini.cpu(),  # targets (for analysis)
         "loss": loss_list,  # scalar training loss per epoch
-        "grad_norm": grad_list,  # simple grad stats list per epoch
-        "n_epochs": int(n_epochs),  # NEW
-        "args": vars(args),  # NEW (CLI config)
-        "env": env_report(),  # NEW (versions/flags)
-        "rng": rng_snapshot(),  # NEW (resume deterministically)
+        "mean_squared_grads": grad_list,  # simple grad stats list per epoch
+        "n_epochs": int(n_epochs),
+        "args": vars(args),  #  (CLI config)
+        "env": env_report(),  #  (versions/flags)
+        "rng": rng_snapshot(),  #  (resume deterministically)
         "snapshot_epochs": snapshot_epochs,  # epochs at which hidden/output were recorded
     }
     if args.partial:
@@ -515,8 +562,12 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
             tmp = []
             for name, p in net.named_parameters():
                 if p.requires_grad:
-                    grad_np = p.grad.detach().cpu().numpy()
-                    tmp.append(np.mean(grad_np**2))
+                    if p.grad is None:
+                        print(f"WARNING: {name} has no grad")
+                        tmp.append(0.0)
+                    else:
+                        grad_np = p.grad.detach().cpu().numpy()
+                        tmp.append(np.mean(grad_np**2))
             grad_list.append(tmp)
 
             # Apply masks: zero gradients where Mask == True (freeze for those entries)
@@ -628,8 +679,12 @@ def _alpha_tag(a: float) -> str:
 def _resolve_variant(whh_type: str) -> str:
     if whh_type in {"cent", "cent-cyc", "shifted", "shifted-cyc"}:
         return "mh-variants"
-    else:  # {"identity","shift","shift-cyc"}
+    elif whh_type in {"identity", "shift", "shift-cyc"}:
         return "shift-variants"
+    elif whh_type == "none":
+        return "random-init"
+    else:
+        raise ValueError(f"Unknown whh_type {whh_type}")
 
 
 def _prefix_from_type(whh_type: str) -> str:
@@ -641,6 +696,7 @@ def _prefix_from_type(whh_type: str) -> str:
         "identity": "identity",
         "shift": "shift",
         "shift-cyc": "shiftcyc",
+        "none": "random",
     }
     return mapping[whh_type]
 
@@ -650,7 +706,10 @@ def _norm_shortname(norm: str) -> str:
 
 
 def _resolve_hidden_path(
-    hidden_N: int, whh_type: str, whh_norm: str, alpha: float | None
+    hidden_N: int,
+    whh_type: str,
+    whh_norm: str,
+    alpha: Optional[float] = None,
 ) -> str:
     variant = _resolve_variant(whh_type)
     norm_dir = whh_norm  # directory name is full strategy
@@ -670,7 +729,7 @@ def _resolve_hidden_path(
 
 
 def _load_hidden_into_elman(
-    net: nn.Module, npy_path: str, device: torch.device | None = None
+    net: nn.Module, npy_path: str, device: Optional[torch.device] = None
 ):
     """Copy an (H,H) numpy array into ElmanRNN's recurrent weight."""
     W = np.load(npy_path)

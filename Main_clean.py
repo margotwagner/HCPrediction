@@ -262,8 +262,10 @@ def main():
     else:
         print("[whh] using default random init", file=f)
 
-    # Auto-build savename if not provided, mirroring init structure
+    # Cache initial recurrent matrix (after any override)
+    W0 = net.rnn.weight_hh_l0.detach().cpu().numpy()
 
+    # Auto-build savename if not provided, mirroring init structure
     if not args.savename:
         if args.whh_type == "none":
             # No override: keep it simple but structured
@@ -454,8 +456,9 @@ def main():
         grad_metrics_history,
         hidden_metrics_history,
         weight_structure_history,
+        W_hh_history,
     ) = train_partial(
-        X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, Mask
+        X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, Mask, W0
     )
     end = time.time()
     deltat = end - start
@@ -508,6 +511,12 @@ def main():
         "weight_structure": {
             "history": weight_structure_history,
         },
+        "weights": {
+            "W_hh_init": W0.astype(np.float16),  # NEW: initial W (compact)
+            "W_hh_history": np.array(
+                W_hh_history, dtype=np.float16
+            ),  # [num_snaps, H, H]
+        },
         "n_epochs": int(n_epochs),
         "args": vars(args),  #  (CLI config)
         "env": env_report(),  #  (versions/flags)
@@ -523,7 +532,9 @@ def main():
 # -------------------------------------------------
 # Training loop with optional partial-parameter masks
 # -------------------------------------------------
-def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, Mask):
+def train_partial(
+    X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, Mask, W0=None
+):
     """
     Train with optional untrainable masks on selected parameters.
 
@@ -567,6 +578,7 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
     snapshot_epochs = []  # epochs at which snapshots were taken
     hidden_metrics_history = []  # per-snapshot hidden stats/dynamics/geometry/function
     weight_structure_history = []  # per-snapshot W_hh symmetry/asymmetry metrics
+    W_hh_history = []  # raw W_hh per snapshot (float16)
 
     with tqdm(total=n_epochs, desc="Progress", unit="epoch") as pbar:
         for epoch in range(n_epochs):
@@ -706,9 +718,12 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
                     }
                 )
 
-                # --- Weight-structure metrics (S/A mix, non-normality) ---
-                wstruct = _weight_structure_metrics(net)
+                # --- Weight-structure metrics (S/A mix, non-normality, drift) ---
+                wstruct = _weight_structure_metrics(net, W0=W0)
                 weight_structure_history.append({"epoch": int(epoch), **wstruct})
+                # --- Save raw W_hh for offline analysis (compact float16) ---
+                W_snap = net.rnn.weight_hh_l0.detach().cpu().numpy().astype(np.float16)
+                W_hh_history.append(W_snap)
                 print("Epoch: {}/{}.............".format(epoch, n_epochs), end=" ")
                 print("Loss: {:.4f}".format(loss.item()))
                 print("Time Elapsed since last display: {0:.1f} seconds".format(deltat))
@@ -728,6 +743,7 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
         grad_metrics_history,
         hidden_metrics_history,
         weight_structure_history,
+        W_hh_history,
     )
 
 
@@ -994,10 +1010,10 @@ def _decode_ring_linear(h_seq, Target_stepwise):
     return {"ring_decode_R2": float(r2)}
 
 
-def _weight_structure_metrics(net):
+def _weight_structure_metrics(net, W0=None):
     """
-    Summarize the actual symmetry/asymmetry and non-normality of W_hh.
-    Extract W_hh, compute S/A norms & ratios. Return scalar metrics + (optionally) S/A.
+    Summarize symmetry/asymmetry and non-normality of W_hh.
+    If W0 is provided (numpy array), also report Frobenius drift and relative drift.
     """
     W = net.rnn.weight_hh_l0.detach().float().cpu().numpy()
     S = 0.5 * (W + W.T)
@@ -1013,7 +1029,8 @@ def _weight_structure_metrics(net):
     # non-normality: || W W^T - W^T W ||_F
     comm = W @ W.T - W.T @ W
     nnorm = float(np.linalg.norm(comm, "fro"))
-    return {
+
+    out = {
         "fro_W": nW,
         "fro_S": nS,
         "fro_A": nA,
@@ -1021,9 +1038,13 @@ def _weight_structure_metrics(net):
         "asym_ratio": asym_ratio,
         "mix_A_over_S": mix,
         "non_normality_commutator": nnorm,
-        # keep arrays out by default to avoid large files:
-        # "S": S, "A": A
     }
+    if W0 is not None:
+        d = W - W0
+        drift = float(np.linalg.norm(d, "fro"))
+        out["fro_drift_W_minus_W0"] = drift
+        out["rel_drift_W_minus_W0"] = drift / (float(np.linalg.norm(W0, "fro")) + 1e-12)
+    return out
 
 
 if __name__ == "__main__":

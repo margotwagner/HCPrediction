@@ -27,7 +27,7 @@ from RNN_Class import *
 from tqdm import tqdm
 import random
 from typing import Optional
-
+import math
 
 parser = argparse.ArgumentParser(description="PyTorch Elman BPTT Training")
 parser.add_argument(
@@ -448,10 +448,12 @@ def main():
         net,
         loss_list,
         grad_list,
-        hidden,
-        y_hat,
+        hidden_rep,
+        output_rep,
         snapshot_epochs,
         grad_metrics_history,
+        hidden_metrics_history,
+        weight_structure_history,
     ) = train_partial(
         X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, Mask
     )
@@ -499,6 +501,12 @@ def main():
                     else {}
                 ).items()
             },
+        },
+        "hidden_metrics": {
+            "history": hidden_metrics_history,
+        },
+        "weight_structure": {
+            "history": weight_structure_history,
         },
         "n_epochs": int(n_epochs),
         "args": vars(args),  #  (CLI config)
@@ -557,6 +565,8 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
     grad_list = []  # mean(grad^2) per param group each snapshot
     grad_metrics_history = []  # detailed grad metrics per snapshot
     snapshot_epochs = []  # epochs at which snapshots were taken
+    hidden_metrics_history = []  # per-snapshot hidden stats/dynamics/geometry/function
+    weight_structure_history = []  # per-snapshot W_hh symmetry/asymmetry metrics
 
     with tqdm(total=n_epochs, desc="Progress", unit="epoch") as pbar:
         for epoch in range(n_epochs):
@@ -671,6 +681,34 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
                 hidden_rep.append(h_seq.detach().cpu().numpy())
                 output_rep.append(output.detach().cpu().numpy())
                 snapshot_epochs.append(epoch)
+                # --- Hidden-state metrics (Activation, Stability, Dynamics, Geometry, Function) ---
+                act_stats = _hidden_activation_stats(
+                    h_seq, act=("tanh" if args.rnn_act != "relu" else "relu")
+                )
+                dyn_metrics = _temporal_metrics(h_seq)
+                geom_metrics = _geometry_metrics(h_seq, max_components=10)
+                # Function: decode ring variable from Target (use same time slice as h_seq)
+                tgt_slice = (
+                    Target[:, : h_seq.shape[1], :]
+                    if "Target" in locals()
+                    else Target_mini[:, : h_seq.shape[1], :]
+                )
+                func_metrics = _decode_ring_linear(h_seq, tgt_slice)
+
+                # Merge into one record
+                hidden_metrics_history.append(
+                    {
+                        "epoch": int(epoch),
+                        "activation": act_stats,
+                        "dynamics": dyn_metrics,
+                        "geometry": geom_metrics,
+                        "function": func_metrics,
+                    }
+                )
+
+                # --- Weight-structure metrics (S/A mix, non-normality) ---
+                wstruct = _weight_structure_metrics(net)
+                weight_structure_history.append({"epoch": int(epoch), **wstruct})
                 print("Epoch: {}/{}.............".format(epoch, n_epochs), end=" ")
                 print("Loss: {:.4f}".format(loss.item()))
                 print("Time Elapsed since last display: {0:.1f} seconds".format(deltat))
@@ -688,6 +726,8 @@ def train_partial(X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, 
         output_rep,
         snapshot_epochs,
         grad_metrics_history,
+        hidden_metrics_history,
+        weight_structure_history,
     )
 
 
@@ -837,6 +877,152 @@ def _compute_grad_metrics(net: nn.Module):
     return {
         "global": {"L2": global_L2, "RMS": global_RMS, "n": int(total_n)},
         "groups": groups,
+    }
+
+
+def _hidden_activation_stats(h_seq, act="tanh", sat_eps=0.95):
+    """
+    h_seq: torch.Tensor [batch, T, H] hidden activity sequence
+    Returns scalar stats over batch×time×units (mean, std across all batchxtimexunits, sat_ratio fraction of activations near saturation if tanh, energy_L2_mean mean per-step L2 norm averaged over time).
+    """
+    h = h_seq.detach()
+    mean = float(h.mean().item())
+    std = float(h.std(unbiased=False).item())
+    if act == "tanh":
+        # fraction near saturation (|h| >= sat_eps)
+        sat = float(((h.abs() >= sat_eps).float().mean().item()))
+    else:
+        sat = None
+    # stability proxy: mean L2 over time (per-step norm averaged)
+    # reshape to [B*T, H]
+    BT, H = h.shape[0] * h.shape[1], h.shape[2]
+    h2 = h.reshape(-1, H)
+    energy = float(torch.linalg.vector_norm(h2, dim=1).mean().item())
+    return {"mean": mean, "std": std, "sat_ratio": sat, "energy_L2_mean": energy}
+
+
+def _temporal_metrics(h_seq):
+    """
+    Quantify simple temporal metrics from hidden state sequence.
+    Returns simple temporal structure readouts:
+    - lag1_autocorr: average across units of corr(h_t, h_{t+1})
+    - dominant_freq_idx: argmax non-DC FFT bin averaged over units (index)
+    """
+    h = h_seq.detach()  # [B,T,H]
+    B, T, H = h.shape
+    if T < 3:
+        return {"lag1_autocorr": None, "dominant_freq_idx": None}
+    # center over time per (B,unit)
+    x = h - h.mean(dim=1, keepdim=True)
+    # lag-1 autocorr
+    num = (x[:, :-1, :] * x[:, 1:, :]).sum(dim=1)
+    den = (
+        x[:, :-1, :].pow(2).sum(dim=1) * x[:, 1:, :].pow(2).sum(dim=1)
+    ).sqrt() + 1e-12
+    r1 = (num / den).nanmean(dim=0)  # [H]
+    lag1 = float(r1.nanmean().item())
+    # crude dominant frequency via FFT magnitude (drop DC=0)
+    # average across batch and units
+    X = torch.fft.rfft(x, dim=1)  # [B, F, H]
+    mag = X.abs().mean(dim=0).mean(dim=1)  # [F]
+    if mag.numel() > 1:
+        dom_idx = int(torch.argmax(mag[1:]).item() + 1)
+    else:
+        dom_idx = None
+    return {"lag1_autocorr": lag1, "dominant_freq_idx": dom_idx}
+
+
+def _geometry_metrics(h_seq, max_components=50):
+    """
+    Measure low-dimensional structure (e.g. ring manifold) via PCA.
+    Low-d geometry via PCA on [B*T, H].
+    Returns: participation_ratio, evr_top (list of first few EV ratios)
+    """
+    h = h_seq.detach()
+    BT, H = h.shape[0] * h.shape[1], h.shape[2]
+    X = h.reshape(BT, H) - h.reshape(BT, H).mean(dim=0, keepdim=True)
+    # cov eigenvalues (use float64 for stability)
+    C = (X.T @ X) / max(BT - 1, 1)
+    evals = torch.linalg.eigvalsh(C.to(dtype=torch.float64)).clamp(min=0)
+    s = evals.sum()
+    pr = float((s**2 / (evals.pow(2).sum() + 1e-12)).item())  # participation ratio
+    # explained variance ratios (first K descending)
+    ev_sorted = torch.sort(evals, descending=True).values
+    evr = (ev_sorted / (s + 1e-12)).tolist()
+    return {"participation_ratio": pr, "evr_top": evr[: min(max_components, len(evr))]}
+
+
+def _targets_to_angles(Target_stepwise):
+    """
+    Convert per-step target distribution over N positions to angle θ ∈ [-π, π).
+    Target_stepwise: torch.Tensor [B, T, N] (not one-hot required; any nonneg weights)
+    """
+    B, T, N = Target_stepwise.shape
+    idx = torch.arange(N, device=Target_stepwise.device)
+    theta = 2 * math.pi * idx / N  # [N]
+    cos_th = torch.cos(theta)
+    sin_th = torch.sin(theta)
+    # vector mean on circle (per B,T)
+    w = Target_stepwise / (Target_stepwise.sum(dim=2, keepdim=True) + 1e-12)
+    C = (w * cos_th).sum(dim=2)
+    S = (w * sin_th).sum(dim=2)
+    ang = torch.atan2(S, C)  # [-pi, pi]
+    return ang  # [B, T]
+
+
+def _decode_ring_linear(h_seq, Target_stepwise):
+    """
+    Test how well hidden states linearly encode ring position
+    Simple linear decode: h -> [cos θ, sin θ], returns R^2 mean of both heads.
+    h_seq: [B, T, H], Target_stepwise: [B, T, N]
+    """
+    ang = _targets_to_angles(Target_stepwise)  # [B, T]
+    y = torch.stack([torch.cos(ang), torch.sin(ang)], dim=2)  # [B, T, 2]
+    X = h_seq.reshape(-1, h_seq.shape[2])
+    Y = y.reshape(-1, 2)
+    Xc = X - X.mean(dim=0, keepdim=True)
+    Yc = Y - Y.mean(dim=0, keepdim=True)
+    # closed-form linear reg: W = (X^T X)^-1 X^T Y  (use ridge λ small)
+    lam = 1e-6
+    XtX = Xc.T @ Xc + lam * torch.eye(Xc.shape[1], device=X.device, dtype=X.dtype)
+    W = torch.linalg.solve(XtX, Xc.T @ Yc)  # [H,2]
+    Yhat = Xc @ W + Y.mean(dim=0, keepdim=True)
+    # R^2 per head
+    ss_res = ((Y - Yhat) ** 2).sum(dim=0)
+    ss_tot = ((Y - Y.mean(dim=0, keepdim=True)) ** 2).sum(dim=0) + 1e-12
+    r2 = (1.0 - ss_res / ss_tot).mean().item()
+    return {"ring_decode_R2": float(r2)}
+
+
+def _weight_structure_metrics(net):
+    """
+    Summarize the actual symmetry/asymmetry and non-normality of W_hh.
+    Extract W_hh, compute S/A norms & ratios. Return scalar metrics + (optionally) S/A.
+    """
+    W = net.rnn.weight_hh_l0.detach().float().cpu().numpy()
+    S = 0.5 * (W + W.T)
+    A = 0.5 * (W - W.T)
+
+    def fro(x):
+        return float(np.linalg.norm(x, "fro"))
+
+    nW, nS, nA = fro(W), fro(S), fro(A)
+    sym_ratio = nS / (nW + 1e-12)
+    asym_ratio = nA / (nW + 1e-12)
+    mix = nA / (nS + 1e-12)
+    # non-normality: || W W^T - W^T W ||_F
+    comm = W @ W.T - W.T @ W
+    nnorm = float(np.linalg.norm(comm, "fro"))
+    return {
+        "fro_W": nW,
+        "fro_S": nS,
+        "fro_A": nA,
+        "sym_ratio": sym_ratio,
+        "asym_ratio": asym_ratio,
+        "mix_A_over_S": mix,
+        "non_normality_commutator": nnorm,
+        # keep arrays out by default to avoid large files:
+        # "S": S, "A": A
     }
 
 

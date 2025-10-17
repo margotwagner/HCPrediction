@@ -457,12 +457,13 @@ def main():
         hidden_metrics_history,
         weight_structure_history,
         W_hh_history,
+        error_metrics_history,
     ) = train_partial(
         X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, Mask, W0
     )
     end = time.time()
     deltat = end - start
-    print("Total training time: {0:.1f} minuetes".format(deltat / 60), file=f)
+    print("Total training time: {0:.1f} minutes".format(deltat / 60), file=f)
 
     # -----------------
     # Plot loss curve
@@ -517,10 +518,19 @@ def main():
                 W_hh_history, dtype=np.float16
             ),  # [num_snaps, H, H]
         },
+        "error_metrics": {
+            "history": error_metrics_history,
+            # quick series for plotting
+            "angle_error_R": [e["angle_error_R"] for e in error_metrics_history],
+            "residual_lag1_autocorr": [
+                e["residual_lag1_autocorr"] for e in error_metrics_history
+            ],
+            "residual_L2_mean": [e["residual_L2_mean"] for e in error_metrics_history],
+        },
         "n_epochs": int(n_epochs),
-        "args": vars(args),  #  (CLI config)
-        "env": env_report(),  #  (versions/flags)
-        "rng": rng_snapshot(),  #  (resume deterministically)
+        "args": vars(args),  # (CLI config)
+        "env": env_report(),  # (versions/flags)
+        "rng": rng_snapshot(),  # (resume deterministically)
         "snapshot_epochs": snapshot_epochs,  # epochs at which hidden/output were recorded
     }
     if args.partial:
@@ -579,6 +589,7 @@ def train_partial(
     hidden_metrics_history = []  # per-snapshot hidden stats/dynamics/geometry/function
     weight_structure_history = []  # per-snapshot W_hh symmetry/asymmetry metrics
     W_hh_history = []  # raw W_hh per snapshot (float16)
+    error_metrics_history = []  # per-snapshot error metrics (angle + residuals)
 
     with tqdm(total=n_epochs, desc="Progress", unit="epoch") as pbar:
         for epoch in range(n_epochs):
@@ -662,7 +673,7 @@ def train_partial(
                         p.data.clamp_(0)
             if args.constraino:
                 for name, p in net.named_parameters():
-                    if name == "linear_weight":
+                    if name == "linear.weight":
                         p.data.clamp_(0)
 
             # Simple early stoppping: requires >1000; checks small loss change and low absolute loss
@@ -705,6 +716,16 @@ def train_partial(
                     if "Target" in locals()
                     else Target_mini[:, : h_seq.shape[1], :]
                 )
+                # --- Error-centric metrics (angular concentration + residual autocorr) ---
+                # Use same time window as hidden/output snapshot
+                out_slice = output[
+                    :, : h_seq.shape[1], :
+                ]  # output already matches, this is explicit
+                err_ang = _angle_error_metrics(out_slice, tgt_slice)
+                err_res = _residual_autocorr(out_slice, tgt_slice)
+                error_metrics_history.append(
+                    {"epoch": int(epoch), **err_ang, **err_res}
+                )
                 func_metrics = _decode_ring_linear(h_seq, tgt_slice)
 
                 # Merge into one record
@@ -744,6 +765,7 @@ def train_partial(
         hidden_metrics_history,
         weight_structure_history,
         W_hh_history,
+        error_metrics_history,
     )
 
 
@@ -1045,6 +1067,71 @@ def _weight_structure_metrics(net, W0=None):
         out["fro_drift_W_minus_W0"] = drift
         out["rel_drift_W_minus_W0"] = drift / (float(np.linalg.norm(W0, "fro")) + 1e-12)
     return out
+
+
+def _angle_error_metrics(output, Target_stepwise):
+    """
+    Angular error concentration for circular targets.
+    Uses vector-mean angle of distributions to get θ̂ and θ, then Δθ = wrap(θ̂-θ).
+    Returns: resultant length R (higher = more concentrated), circular variance = 1-R.
+    """
+    # Ensure proper distributions (nonneg, sum=1 over features)
+    pred = output.detach()
+    pred = pred.clamp_min(0)
+    pred = pred / (pred.sum(dim=2, keepdim=True) + 1e-12)
+
+    # True angles from targets (already a distribution)
+    theta_true = _targets_to_angles(Target_stepwise)  # [B, T]
+
+    # Predicted angles from model outputs
+    B, T, N = pred.shape
+    idx = torch.arange(N, device=pred.device)
+    theta = 2 * math.pi * idx / N
+    cos_th, sin_th = torch.cos(theta), torch.sin(theta)
+
+    C_pred = (pred * cos_th).sum(dim=2)
+    S_pred = (pred * sin_th).sum(dim=2)
+    theta_pred = torch.atan2(S_pred, C_pred)  # [B, T]
+
+    # Δθ wrapped to [-π, π)
+    dtheta = torch.atan2(
+        torch.sin(theta_pred - theta_true), torch.cos(theta_pred - theta_true)
+    )  # [B, T]
+
+    # Resultant length R of the phase errors
+    R = torch.sqrt((torch.cos(dtheta).mean()) ** 2 + (torch.sin(dtheta).mean()) ** 2)
+    R = float(R.item())
+    return {"angle_error_R": R, "angle_error_circ_var": float(1.0 - R)}
+
+
+def _residual_autocorr(output, Target_stepwise):
+    """
+    Lag-1 autocorrelation of residual magnitudes.
+    Residual per step is L2 norm of (Target - Output) over features; then compute lag-1 autocorr.
+    Also returns mean residual L2 for scale context.
+    """
+    pred = output.detach()
+    # If outputs aren't guaranteed to be probs, just compare raw; that’s fine for trend.
+    res = Target_stepwise - pred  # [B, T, N]
+    rnorm = torch.linalg.vector_norm(res, dim=2)  # [B, T]
+
+    if rnorm.shape[1] < 3:
+        return {
+            "residual_lag1_autocorr": None,
+            "residual_L2_mean": float(rnorm.mean().item()),
+        }
+
+    x = rnorm - rnorm.mean(dim=1, keepdim=True)
+    num = (x[:, :-1] * x[:, 1:]).sum(dim=1)  # [B]
+    den = (
+        torch.sqrt((x[:, :-1] ** 2).sum(dim=1) * (x[:, 1:] ** 2).sum(dim=1)) + 1e-12
+    )  # [B]
+    lag1 = (num / den).mean().item()
+
+    return {
+        "residual_lag1_autocorr": float(lag1),
+        "residual_L2_mean": float(rnorm.mean().item()),
+    }
 
 
 if __name__ == "__main__":

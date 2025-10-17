@@ -124,7 +124,7 @@ def _angle_error_concentration(output: torch.Tensor, Target: torch.Tensor):
 def _residual_stats(output: torch.Tensor, Target: torch.Tensor):
     """Residual magnitude mean (L2) and lag-1 autocorrelation over time."""
     res = Target - output
-    rnorm = torch.linalg.vector_norm(res, dim=2)  # [B,T]
+    rnorm = _vector_norm_compat(res, dim=2)  # [B,T]
     mean_L2 = float(rnorm.mean().item())
     if rnorm.shape[1] < 3:
         return {"residual_lag1_autocorr": None, "residual_L2_mean": mean_L2}
@@ -146,7 +146,7 @@ def _ring_decode_r2_from_outputs(
     Y = torch.stack([torch.cos(theta), torch.sin(theta)], dim=1)  # [BT,2]
     XtX = X.T @ X
     I = torch.eye(N, device=X.device, dtype=X.dtype)
-    W = torch.linalg.solve(XtX + ridge * I, X.T @ Y)
+    W = W = torch.inverse(XtX + ridge * I) @ (X.T @ Y)
     Yhat = X @ W
     ss_tot = ((Y - Y.mean(dim=0, keepdim=True)) ** 2).sum(dim=0)
     ss_res = ((Y - Yhat) ** 2).sum(dim=0)
@@ -671,6 +671,13 @@ def main():
         default_name = f"{ckpt_stem}_{args.mode}.csv"
         csv_path = Path("./runs_eval") / default_name if args.csv is None else args.csv
         _evaluate_one_ckpt(args.ckpt, args, csv_path)
+
+
+def _vector_norm_compat(x: torch.Tensor, dim=None, keepdim=False, eps=0.0):
+    # L2 norm without torch.linalg
+    if dim is None:
+        return torch.sqrt(torch.clamp((x * x).sum(), min=eps))
+    return torch.sqrt(torch.clamp((x * x).sum(dim=dim, keepdim=keepdim), min=eps))
 
 
 if __name__ == "__main__":

@@ -165,7 +165,7 @@ parser.add_argument("--seed", type=int, default=1337, help="Global RNG seed")
 parser.add_argument(
     "--whh_type",
     type=str,
-    default="identity",
+    default="none",
     choices=[
         "none",
         "cent",
@@ -216,11 +216,45 @@ def main():
     hidden_N = args.hidden_n
     set_seed(args.seed)
 
+    # Auto-build savename if not provided, mirroring init structure
+    if not args.savename:
+        if args.whh_type == "none":
+            # No override: keep it simple but structured
+            out_dir = os.path.join(args.out_root, "ElmanRNN", "random-init")
+            prefix = _prefix_from_type("none")  # "random"
+            fname_bits = [f"{prefix}_n{hidden_N}"]
+        else:
+            variant = _resolve_variant(args.whh_type)
+            norm_dir = args.whh_norm
+            out_dir = os.path.join(
+                args.out_root, "ElmanRNN", variant, args.whh_type, norm_dir
+            )
+            if (
+                args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
+                and args.alpha is not None
+            ):
+                out_dir = os.path.join(out_dir, _alpha_tag(args.alpha))
+            prefix = _prefix_from_type(args.whh_type)
+            norm_short = _norm_shortname(args.whh_norm)
+            fname_bits = [f"{prefix}_n{hidden_N}_{norm_short}"]
+            if (
+                args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
+                and args.alpha is not None
+            ):
+                fname_bits.append(_alpha_tag(args.alpha))
+
+        if args.run_tag:
+            fname_bits.append(str(args.run_tag))
+        # make folder and set savename base (no extension)
+        if not args.savename:
+            os.makedirs(out_dir, exist_ok=True)
+            args.savename = os.path.join(out_dir, "_".join(fname_bits))
+
     # ---------------------
     # Open a simple log file
     # ---------------------
     global f
-    f = open(args.savename + ".txt", "w") if args.savename else open("train.log", "w")
+    f = open(args.savename + ".log", "w") if args.savename else open("train.log", "w")
     print("Settings:", file=f)
     print(str(sys.argv), file=f)
 
@@ -264,40 +298,6 @@ def main():
 
     # Cache initial recurrent matrix (after any override)
     W0 = net.rnn.weight_hh_l0.detach().cpu().numpy()
-
-    # Auto-build savename if not provided, mirroring init structure
-    if not args.savename:
-        if args.whh_type == "none":
-            # No override: keep it simple but structured
-            out_dir = os.path.join(args.out_root, "ElmanRNN", "random-init")
-            prefix = _prefix_from_type("none")  # "random"
-            norm_short = "pytorch"
-            fname_bits = [f"{prefix}_n{hidden_N}_{norm_short}"]
-        else:
-            variant = _resolve_variant(args.whh_type)
-            norm_dir = args.whh_norm
-            out_dir = os.path.join(
-                args.out_root, "ElmanRNN", variant, args.whh_type, norm_dir
-            )
-            if (
-                args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
-                and args.alpha is not None
-            ):
-                out_dir = os.path.join(out_dir, _alpha_tag(args.alpha))
-            prefix = _prefix_from_type(args.whh_type)
-            norm_short = _norm_shortname(args.whh_norm)
-            fname_bits = [f"{prefix}_n{hidden_N}_{norm_short}"]
-            if (
-                args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
-                and args.alpha is not None
-            ):
-                fname_bits.append(_alpha_tag(args.alpha))
-
-    if args.run_tag:
-        fname_bits.append(str(args.run_tag))
-    # make folder and set savename base (no extension)
-    os.makedirs(out_dir, exist_ok=True)
-    args.savename = os.path.join(out_dir, "_".join(fname_bits))
 
     # Optionally change the RNN hidden nonlinearity
     if args.rnn_act == "relu":
@@ -369,7 +369,7 @@ def main():
             elif name == "rnn.bias_hh_l0":
                 p.requires_grad = False
                 p.data.fill_(0)
-                print("Fixing input bias to 0", file=f)
+                print("Fixing recurrent bias to 0", file=f)
 
     # ------------------
     # Loss & checkpoint
@@ -640,7 +640,8 @@ def train_partial(
             # Apply masks: zero gradients where Mask == True (freeze for those entries)
             for l, p in enumerate(net.parameters()):
                 if p.requires_grad:
-                    p.grad.data[torch.from_numpy(Mask[l].astype(bool))] = 0
+                    mask = torch.from_numpy(Mask[l].astype(bool)).to(p.grad.device)
+                    p.grad.data[mask] = 0.0
 
             # Optional gradient norm clipping (global norm)
             if args.clamp_norm:
@@ -682,7 +683,7 @@ def train_partial(
                     loss_list[i + 1] - loss_list[i] for i in range(len(loss_list) - 1)
                 ]
                 mean_diff = np.mean(abs(np.array(diff[-5:-1])))
-                init_loss = np.mean(np.array(loss_list[0]))
+                init_loss = loss_list[0]
                 if (
                     mean_diff < loss.item() * 0.00001
                     and loss.item() < init_loss * 0.010
@@ -935,7 +936,7 @@ def _hidden_activation_stats(h_seq, act="tanh", sat_eps=0.95):
     # reshape to [B*T, H]
     BT, H = h.shape[0] * h.shape[1], h.shape[2]
     h2 = h.reshape(-1, H)
-    energy = float(torch.linalg.vector_norm(h2, dim=1).mean().item())
+    energy = float(_vector_norm_compat(h2, dim=-1).mean().item())
     return {"mean": mean, "std": std, "sat_ratio": sat, "energy_L2_mean": energy}
 
 
@@ -957,8 +958,8 @@ def _temporal_metrics(h_seq):
     den = (
         x[:, :-1, :].pow(2).sum(dim=1) * x[:, 1:, :].pow(2).sum(dim=1)
     ).sqrt() + 1e-12
-    r1 = (num / den).nanmean(dim=0)  # [H]
-    lag1 = float(r1.nanmean().item())
+    r1 = _nanmean_compat(num / den, dim=0)  # [H]
+    lag1 = float(_nanmean_compat(r1).item())
     # crude dominant frequency via FFT magnitude (drop DC=0)
     # average across batch and units
     X = torch.fft.rfft(x, dim=1)  # [B, F, H]
@@ -1132,6 +1133,24 @@ def _residual_autocorr(output, Target_stepwise):
         "residual_lag1_autocorr": float(lag1),
         "residual_L2_mean": float(rnorm.mean().item()),
     }
+
+
+def _vector_norm_compat(x: torch.Tensor, dim=None, keepdim=False, eps=0.0):
+    # L2 norm without torch.linalg
+    if dim is None:
+        return torch.sqrt(torch.clamp((x * x).sum(), min=eps))
+    return torch.sqrt(torch.clamp((x * x).sum(dim=dim, keepdim=keepdim), min=eps))
+
+
+def _nanmean_compat(x: torch.Tensor, dim=None, keepdim=False):
+    """Mean that ignores NaN/Inf on old torch versions."""
+    mask = torch.isfinite(x)
+    # replace non-finite with 0 for the sum, and divide by count of finite
+    summed = torch.where(mask, x, torch.zeros((), dtype=x.dtype, device=x.device)).sum(
+        dim=dim, keepdim=keepdim
+    )
+    count = mask.sum(dim=dim, keepdim=keepdim).clamp(min=1)
+    return summed / count
 
 
 if __name__ == "__main__":

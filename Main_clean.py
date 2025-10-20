@@ -205,13 +205,13 @@ parser.add_argument(
     help="Optional extra tag appended to filename (e.g., seed or note)",
 )
 parser.add_argument(
-    "--num-runs",
+    "--num_runs",
     type=int,
     default=1,
     help="How many sequential runs to perform; each run saves under run_XX/",
 )
 parser.add_argument(
-    "--run-offset",
+    "--run_offset",
     type=int,
     default=-1,
     help="If >=0, start run numbering at this index; otherwise auto-pick the next free index.",
@@ -220,7 +220,7 @@ parser.add_argument(
 
 def main():
     """Entry point: parse args, build data/model/optimizer, train, and save artifacts"""
-    global args
+    global args, f
 
     args = parser.parse_args()
     lr = args.lr
@@ -228,6 +228,7 @@ def main():
     N = args.n
     hidden_N = args.hidden_n
     set_seed(args.seed)
+    f = None  # global log handle (opened per run later)
 
     # Auto-build savename if not provided, mirroring init structure
     if not args.savename:
@@ -273,14 +274,14 @@ def main():
 
     # Autoencoder mode: predict input itself (testing)
     if args.ae:
-        print("Autoencoder scenario: Target = Input", file=f)
+        log("Autoencoder scenario: Target = Input")
         Target_mini = loaded["X_mini"]
 
     # One-step prediction: align X and Target for next-step forecasting
     if args.pred:
         X_mini = X_mini[:, :-1, :]
         Target_mini = Target_mini[:, 1:, :]
-        print("Predicting one-step ahead", file=f)
+        log("Predicting one-step ahead")
 
     # ---------------------
     # Define the network
@@ -294,12 +295,12 @@ def main():
             path = _resolve_hidden_path(
                 hidden_N, args.whh_type, args.whh_norm, args.alpha
             )
-            print(f"[whh] loading hidden weight from: {path}", file=f)
+            log(f"[whh] loading hidden weight from: {path}")
             _load_hidden_into_elman(net, path, device=net.rnn.weight_hh_l0.device)
         except Exception as e:
-            print(f"[whh] WARNING: failed to load init: {e}", file=f)
+            log(f"[whh] WARNING: failed to load init: {e}")
     else:
-        print("[whh] using default random init", file=f)
+        log("[whh] using default random init")
 
     # Cache initial recurrent matrix (after any override)
     W0 = net.rnn.weight_hh_l0.detach().cpu().numpy()
@@ -307,18 +308,18 @@ def main():
     # Optionally change the RNN hidden nonlinearity
     if args.rnn_act == "relu":
         net.rnn = nn.RNN(N, hidden_N, 1, batch_first=True, nonlinearity="relu")
-        print("RNN nonlinearity: elementwise relu", file=f)
+        log("RNN nonlinearity: elementwise relu")
 
     # Optionally override output activation
     if args.ac_output == "tanh":
         net.act = nn.Tanh()
-        print("Change output activation function to tanh", file=f)
+        log("Change output activation function to tanh")
     elif args.ac_output == "relu":
         net.act = nn.ReLU()
-        print("Change output activation function to relu", file=f)
+        log("Change output activation function to relu")
     elif args.ac_output == "sigmoid":
         net.act = nn.Sigmoid()
-        print("Change output activation function to sigmoid", file=f)
+        log("Change output activation function to sigmoid")
 
     # ------------------------------
     # Optional parameter constraints
@@ -329,7 +330,7 @@ def main():
             if name == "rnn.bias_hh_l0":
                 p.requires_grad = False
                 p.data.fill_(0)
-                print("Fixing RNN bias to 0", file=f)
+                log("Fixing RNN bias to 0")
 
     # Fix input matrix with different modes and freeze it
     if args.fixi:
@@ -338,14 +339,14 @@ def main():
                 if args.fixi == 1:
                     # Positive constant matrix (uniform average)
                     p.data = torch.ones(p.shape) / (p.shape[0] * p.shape[1])
-                    print("Fixing {} to positive constant".format(name), file=f)
+                    log("Fixing {} to positive constant".format(name))
                 elif args.fixi == 2:
                     # Preserve initialization but freeze it
-                    print("Fixing {} to initialization".format(name), file=f)
+                    log("Fixing {} to initialization".format(name))
                 elif args.fixi == 3:
                     # Make current init nonegative by folding absolute values
                     p.data = p.data + torch.abs(p.data)
-                    print("Fixing {} to positive initiation".format(name), file=f)
+                    log("Fixing {} to positive initiation".format(name))
 
                 p.requires_grad = False
 
@@ -355,12 +356,12 @@ def main():
             if name == "linear.weight":
                 if args.fixo == 1:
                     p.data = torch.ones(p.shape) / (p.shape[0] * p.shape[1])
-                    print("Fixing {} to positive constant".format(name), file=f)
+                    log("Fixing {} to positive constant".format(name))
                 elif args.fixo == 2:
-                    print("Fixing {} to initialization".format(name), file=f)
+                    log("Fixing {} to initialization".format(name))
                 elif args.fixo == 3:
                     p.data = p.data + torch.abs(p.data)
-                    print("Fixing {} to positive initiation".format(name), file=f)
+                    log("Fixing {} to positive initiation".format(name))
                 p.requires_grad = False
 
     # Fix recurrent weight and its bias (freeze both)
@@ -370,11 +371,11 @@ def main():
                 p.requires_grad = False
                 # Random in [-1/sqrt(N), 1/sqrt(N)] (Elman-ish scale)
                 p.data = torch.rand(p.data.shape) * 2 * 1 / np.sqrt(N) - 1 / np.sqrt(N)
-                print("Fixing recurrent matrix to a random matrix", file=f)
+                log("Fixing recurrent matrix to a random matrix")
             elif name == "rnn.bias_hh_l0":
                 p.requires_grad = False
                 p.data.fill_(0)
-                print("Fixing recurrent bias to 0", file=f)
+                log("Fixing recurrent bias to 0")
 
     # ------------------
     # Loss & checkpoint
@@ -384,12 +385,12 @@ def main():
     # Optionally resume model weights from a checkpoint(.pth.tar)
     if args.resume:
         if os.path.isfile(args.resume):
-            print("=> loading previous network '{}'".format(args.resume), file=f)
+            log("=> loading previous network '{}'".format(args.resume))
             checkpoint = torch.load(args.resume)
             net.load_state_dict(checkpoint["state_dict"])
-            print("=> loaded previous network '{}' ".format(args.resume), file=f)
+            log("=> loaded previous network '{}' ".format(args.resume))
         else:
-            print("=> no checkpoint found at '{}'".format(args.resume), file=f)
+            log("=> no checkpoint found at '{}'".format(args.resume))
 
     # -----------------------
     # Initial hidden state h0
@@ -416,11 +417,10 @@ def main():
         set_seed(args.seed + run_idx)
 
         # 3) Open a per-run log file (replaces the old one-off log)
-        global f
         f = open(savename_run + ".log", "w")
-        print("Settings:", file=f)
-        print(str(sys.argv), file=f)
-        print(f"[run] index={run_idx}, seed={args.seed + run_idx}", file=f)
+        log("Settings:")
+        log(str(sys.argv))
+        log(f"[run] index={run_idx}, seed={args.seed + run_idx}")
 
         # ---------------------
         # Define the network
@@ -433,12 +433,12 @@ def main():
                 path = _resolve_hidden_path(
                     hidden_N, args.whh_type, args.whh_norm, args.alpha
                 )
-                print(f"[whh] loading hidden weight from: {path}", file=f)
+                log(f"[whh] loading hidden weight from: {path}")
                 _load_hidden_into_elman(net, path, device=net.rnn.weight_hh_l0.device)
             except Exception as e:
-                print(f"[whh] WARNING: failed to load init: {e}", file=f)
+                log(f"[whh] WARNING: failed to load init: {e}")
         else:
-            print("[whh] using default random init", file=f)
+            log("[whh] using default random init")
 
         # Cache initial recurrent matrix (after any override)
         W0 = net.rnn.weight_hh_l0.detach().cpu().numpy()
@@ -446,18 +446,18 @@ def main():
         # Optionally change the RNN hidden nonlinearity
         if args.rnn_act == "relu":
             net.rnn = nn.RNN(N, hidden_N, 1, batch_first=True, nonlinearity="relu")
-            print("RNN nonlinearity: elementwise relu", file=f)
+            log("RNN nonlinearity: elementwise relu")
 
         # Optionally override output activation
         if args.ac_output == "tanh":
             net.act = nn.Tanh()
-            print("Change output activation function to tanh", file=f)
+            log("Change output activation function to tanh")
         elif args.ac_output == "relu":
             net.act = nn.ReLU()
-            print("Change output activation function to relu", file=f)
+            log("Change output activation function to relu")
         elif args.ac_output == "sigmoid":
             net.act = nn.Sigmoid()
-            print("Change output activation function to sigmoid", file=f)
+            log("Change output activation function to sigmoid")
 
         # ------------------------------
         # Optional parameter constraints
@@ -467,19 +467,19 @@ def main():
                 if name == "rnn.bias_hh_l0":
                     p.requires_grad = False
                     p.data.fill_(0)
-                    print("Fixing RNN bias to 0", file=f)
+                    log("Fixing RNN bias to 0")
 
         if args.fixi:
             for name, p in net.named_parameters():
                 if name == "rnn.weight_ih_l0":
                     if args.fixi == 1:
                         p.data = torch.ones(p.shape) / (p.shape[0] * p.shape[1])
-                        print("Fixing {} to positive constant".format(name), file=f)
+                        log("Fixing {} to positive constant".format(name))
                     elif args.fixi == 2:
-                        print("Fixing {} to initialization".format(name), file=f)
+                        log("Fixing {} to initialization".format(name))
                     elif args.fixi == 3:
                         p.data = p.data + torch.abs(p.data)
-                        print("Fixing {} to positive initiation".format(name), file=f)
+                        log("Fixing {} to positive initiation".format(name))
                     p.requires_grad = False
 
         if args.fixo:
@@ -487,12 +487,12 @@ def main():
                 if name == "linear.weight":
                     if args.fixo == 1:
                         p.data = torch.ones(p.shape) / (p.shape[0] * p.shape[1])
-                        print("Fixing {} to positive constant".format(name), file=f)
+                        log("Fixing {} to positive constant".format(name))
                     elif args.fixo == 2:
-                        print("Fixing {} to initialization".format(name), file=f)
+                        log("Fixing {} to initialization".format(name))
                     elif args.fixo == 3:
                         p.data = p.data + torch.abs(p.data)
-                        print("Fixing {} to positive initiation".format(name), file=f)
+                        log("Fixing {} to positive initiation".format(name))
                     p.requires_grad = False
 
         if args.fixw:
@@ -502,11 +502,11 @@ def main():
                     p.data = torch.rand(p.data.shape) * 2 * 1 / np.sqrt(
                         N
                     ) - 1 / np.sqrt(N)
-                    print("Fixing recurrent matrix to a random matrix", file=f)
+                    log("Fixing recurrent matrix to a random matrix")
                 elif name == "rnn.bias_hh_l0":
                     p.requires_grad = False
                     p.data.fill_(0)
-                    print("Fixing recurrent bias to 0", file=f)
+                    log("Fixing recurrent bias to 0")
 
         # ------------------
         # Loss & resume
@@ -515,12 +515,12 @@ def main():
 
         if args.resume:
             if os.path.isfile(args.resume):
-                print("=> loading previous network '{}'".format(args.resume), file=f)
+                log("=> loading previous network '{}'".format(args.resume))
                 checkpoint = torch.load(args.resume)
                 net.load_state_dict(checkpoint["state_dict"])
-                print("=> loaded previous network '{}' ".format(args.resume), file=f)
+                log("=> loaded previous network '{}' ".format(args.resume))
             else:
-                print("=> no checkpoint found at '{}'".format(args.resume), file=f)
+                log("=> no checkpoint found at '{}'".format(args.resume))
 
         # -----------------------
         # Move to device
@@ -544,7 +544,7 @@ def main():
         # Build parameter masks for partial training (if any)
         # ------------------------------------------------
         if args.partial:
-            print("Training sparsity:{}".format(args.partial), file=f)
+            log("Training sparsity:{}".format(args.partial))
             Mask_W = np.random.uniform(0, 1, (hidden_N, hidden_N))
             Mask_B = np.random.uniform(0, 1, (hidden_N))
             Mask_W = Mask_W > args.partial
@@ -558,10 +558,10 @@ def main():
             for name, p in net.named_parameters():
                 if name == "rnn.weight_hh_l0" or name == "hidden_linear.weight":
                     Mask.append(Mask_W)
-                    print("Partially train RNN weight", file=f)
+                    log("Partially train RNN weight")
                 elif name == "rnn.bias_hh_l0" or name == "hidden_linear.bias":
                     Mask.append(Mask_B)
-                    print("Partially train RNN bias", file=f)
+                    log("Partially train RNN bias")
                 else:
                     Mask.append(np.zeros(p.shape))
         else:
@@ -590,7 +590,7 @@ def main():
         )
         end = time.time()
         deltat = end - start
-        print("Total training time: {0:.1f} minutes".format(deltat / 60), file=f)
+        log("Total training time: {0:.1f} minutes".format(deltat / 60))
 
         # -----------------
         # Plot loss curve
@@ -666,8 +666,9 @@ def main():
             save_dict["Mask_W"] = Mask_W
             save_dict["Mask_B"] = Mask_B
 
-        torch.save(save_dict, savename_run + ".pth.tar")  # <--- use savename_run here
+        torch.save(save_dict, savename_run + ".pth.tar")
         f.close()
+        f = None  # close log file
 
 
 # -------------------------------------------------
@@ -730,7 +731,7 @@ def train_partial(
             if args.lr_step:
                 lr_step = list(map(int, args.lr_step.split(",")))
                 if epoch in lr_step:
-                    print("Decrease lr to 50per at epoch {}".format(epoch), file=f)
+                    log("Decrease lr to 50per at epoch {}".format(epoch))
                     for param_group in optimizer.param_groups:
                         param_group["lr"] *= 0.5
 
@@ -1418,6 +1419,18 @@ def _ensure_unique_run_dir(base_savename: str, desired_idx: int) -> (str, int):
             return run_dir, idx
         except FileExistsError:
             idx += 1
+
+
+def log(*args, sep=" ", end="\n"):
+    """Print to run log if open; otherwise to stdout."""
+    global f
+    msg = sep.join(str(a) for a in args) + end
+    if f is not None:
+        f.write(msg)
+        f.flush()
+    else:
+        # fallback to stdout if no run log open yet
+        print(msg, end="")
 
 
 if __name__ == "__main__":

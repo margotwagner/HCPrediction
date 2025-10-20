@@ -11,6 +11,9 @@ It supports options for:
 • Partially training only a subset of parameters via masks
 • Optional gradient-norm clipping and simple early stopping
 • Periodic logging and checkpointing
+
+Usage examples:
+
 """
 import argparse
 import sys

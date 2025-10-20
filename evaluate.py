@@ -16,7 +16,23 @@
 #   - Input and output dims both N (ring task)
 #   - RNN_Class.ElmanRNN_pytorch_module_v2 returns (output_seq, hidden_seq)
 #
-# Author: you + a helpful robot friend :)
+# Usage examples:
+# 1) Evaluate a specfici set of run folders
+# python evaluate.py \
+#  --base-dir ./runs/ElmanRNN/random-init/random_n100 \
+#  --runs 1-3,7,10-12 \
+#  --mode all \
+#  --csv ./runs_eval/random_n100_all.csv
+#
+# 2) Evaluate all runs under a base directory
+# python evaluate.py \
+#   --base-dir ./runs/ElmanRNN/random-init/random_n100 \
+#   --mode closed \
+#   --free-steps 200 \
+#   --csv ./runs_eval/random_n100_closed.csv
+#
+# 3) Evaluate all checkpoints matching a glob
+# python evaluate.py --glob "./runs/**/run_*/**/*.pth.tar" --mode all
 # ------------------------------------------------------------
 
 import argparse
@@ -26,6 +42,9 @@ import csv
 import numpy as np
 import torch
 import torch.nn as nn
+from typing import List
+import re
+
 
 from RNN_Class import ElmanRNN_pytorch_module_v2  # your model class
 
@@ -528,6 +547,88 @@ def _write_csv(row_dict: dict, csv_path: Path):
 # ------------------------- Sweep helpers -------------------------
 
 
+def _zero_pad(n: int, pad: int) -> str:
+    return f"{n:0{pad}d}"
+
+
+def _parse_run_spec(spec: str) -> List[int]:
+    """
+    Parse run ranges like '1-3,7,10-12' -> [1,2,3,7,10,11,12].
+    Empty/None returns [].
+    """
+    if not spec:
+        return []
+    out = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            a, b = int(a), int(b)
+            if a <= b:
+                out.extend(range(a, b + 1))
+            else:
+                out.extend(range(a, b - 1, -1))
+        else:
+            out.append(int(part))
+    return sorted(set(out))
+
+
+def _find_ckpt_in_run_dir(run_dir: Path):
+    """
+    Return a single .pth.tar inside run_dir, or None if not found/unambiguous.
+    If multiple exist, prefer the newest modification time.
+    """
+    cands = list(run_dir.glob("*.pth.tar"))
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    # choose the latest modified if multiple
+    cands.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return cands[0]
+
+
+def _iter_run_ckpts_from_base(base_dir: Path, runs_spec: str, pad: int = 2):
+    """
+    Yield checkpoints for runs contained in base_dir/run_XX/.
+    If runs_spec is empty, iterate all run_* directories, sorted by XX.
+    """
+    if runs_spec:
+        run_ids = _parse_run_spec(runs_spec)
+        for r in run_ids:
+            run_name = f"run_{_zero_pad(r, pad)}"
+            run_dir = base_dir / run_name
+            if run_dir.is_dir():
+                ckpt = _find_ckpt_in_run_dir(run_dir)
+                if ckpt is not None:
+                    yield ckpt
+                else:
+                    print(f"[WARN] No .pth.tar found in {run_dir}")
+            else:
+                print(f"[WARN] Missing run dir: {run_dir}")
+    else:
+        # auto-discover all run_* dirs
+        pat = re.compile(r"^run_(\d+)$")
+        candidates = []
+        for d in base_dir.iterdir():
+            if d.is_dir():
+                m = pat.match(d.name)
+                if m:
+                    candidates.append((int(m.group(1)), d))
+        candidates.sort(key=lambda x: x[0])  # by run number
+        if not candidates:
+            print(f"[WARN] No run_* subdirs found under {base_dir}")
+            return
+        for _, run_dir in candidates:
+            ckpt = _find_ckpt_in_run_dir(run_dir)
+            if ckpt is not None:
+                yield ckpt
+            else:
+                print(f"[WARN] No .pth.tar found in {run_dir}")
+
+
 def _iter_ckpts(glob_pattern: str):
     """
     Yield checkpoint Paths matching a glob (supports **).
@@ -600,6 +701,25 @@ def main():
         default=None,
         help="Glob for multiple checkpoints, e.g. './runs/**/*.pth.tar'",
     )
+    # Evaluate multiple runs under a base directory containing run_XX subfolders
+    p.add_argument(
+        "--base-dir",
+        type=Path,
+        default=None,
+        help="Parent directory containing run_XX subfolders (e.g., .../random_n100).",
+    )
+    p.add_argument(
+        "--runs",
+        type=str,
+        default="",
+        help="Run ids/ranges, e.g. '1-3,7,10-12'. If omitted, evaluate all run_* found.",
+    )
+    p.add_argument(
+        "--pad",
+        type=int,
+        default=2,
+        help="Zero padding for run dirs (default 2 ⇒ run_01).",
+    )
 
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument(
@@ -648,6 +768,29 @@ def main():
     )
 
     args = p.parse_args()
+
+    # CASE 0: base-dir + optional runs (explicit multi-run convenience)
+    if args.base_dir is not None:
+        mode_tag = args.mode
+        csv_path = (
+            Path("./runs_eval") / f"aggregate_{mode_tag}.csv"
+            if args.csv is None
+            else args.csv
+        )
+        matched = list(
+            _iter_run_ckpts_from_base(args.base_dir, args.runs, pad=args.pad)
+        )
+        if not matched:
+            print(
+                f"[WARN] No checkpoints found using base-dir={args.base_dir} runs='{args.runs}'"
+            )
+            return
+        print(
+            f"[INFO] Found {len(matched)} checkpoints in {args.base_dir} (runs='{args.runs or 'ALL'}')."
+        )
+        for ckpt in matched:
+            _evaluate_one_ckpt(ckpt, args, csv_path)
+        return
 
     # Decide CSV path
     if args.glob:

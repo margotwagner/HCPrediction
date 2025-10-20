@@ -15,6 +15,7 @@ It supports options for:
 import argparse
 import sys
 import os
+import re
 import time
 import numpy as np
 import matplotlib
@@ -203,6 +204,18 @@ parser.add_argument(
     default="",
     help="Optional extra tag appended to filename (e.g., seed or note)",
 )
+parser.add_argument(
+    "--num-runs",
+    type=int,
+    default=1,
+    help="How many sequential runs to perform; each run saves under run_XX/",
+)
+parser.add_argument(
+    "--run-offset",
+    type=int,
+    default=-1,
+    help="If >=0, start run numbering at this index; otherwise auto-pick the next free index.",
+)
 
 
 def main():
@@ -249,14 +262,6 @@ def main():
         if not args.savename:
             os.makedirs(out_dir, exist_ok=True)
             args.savename = os.path.join(out_dir, "_".join(fname_bits))
-
-    # ---------------------
-    # Open a simple log file
-    # ---------------------
-    global f
-    f = open(args.savename + ".log", "w") if args.savename else open("train.log", "w")
-    print("Settings:", file=f)
-    print(str(sys.argv), file=f)
 
     # -----------------
     # Load training data
@@ -392,151 +397,277 @@ def main():
     # Shape: (num_layers=1, batch_size, hidden_N)
     h0 = torch.zeros(1, X_mini.shape[0], hidden_N)  # n_layers * BatchN * NHidden
 
-    # --------------
-    # Move to device
-    # --------------
-    if args.gpu:
-        print("Cuda device availability: {}".format(torch.cuda.is_available()), file=f)
-        criterion = criterion.cuda()
-        net = net.cuda()
-        X_mini = X_mini.cuda()
-        Target_mini = Target_mini.cuda()
-        h0 = h0.cuda()
-
-    # ---------------
-    # Optimizer (SGD)
-    # ---------------
-    optimizer = torch.optim.SGD(net.parameters(), lr=lr)
-
-    # ------------------------------------------------
-    # Build parameter masks for partial training (if any)
-    # ------------------------------------------------
-    if args.partial:
-        # 'partial' is the proportion of parameters to be frozen (0-1) (untrainable)
-        print("Training sparsity:{}".format(args.partial), file=f)
-        # Masks for recurrent weight and bias (same shapes as parameters)
-        Mask_W = np.random.uniform(0, 1, (hidden_N, hidden_N))
-        Mask_B = np.random.uniform(0, 1, (hidden_N))
-        # True == UNTRAINED connections (frozen)
-        Mask_W = Mask_W > args.partial
-        Mask_B = Mask_B > args.partial
-
-        # Optional non-overlap with a prior mask if resuming (kept from original)
-        if hasattr(args, "nonoverlap") and args.nonoverlap:
-            Mask_W = ~(~(Mask_W) & checkpoint["Mask_W"])
-            Mask_B = ~(~(Mask_B) & checkpoint["Mask_B"])
-        # Pack masks in order of net.parameters()
-        Mask = []
-        for name, p in net.named_parameters():
-            if name == "rnn.weight_hh_l0" or name == "hidden_linear.weight":
-                Mask.append(Mask_W)
-                print("Partially train RNN weight", file=f)
-            elif name == "rnn.bias_hh_l0" or name == "hidden_linear.bias":
-                Mask.append(Mask_B)
-                print("Partially train RNN bias", file=f)
-            else:
-                Mask.append(np.zeros(p.shape))  # no masking for other params
+    # -------------------------------------------------
+    # Multi-run wrapper: create run_XX dirs and loop
+    # -------------------------------------------------
+    # Decide where to start numbering runs
+    if args.run_offset >= 0:
+        start_idx = args.run_offset
     else:
-        # No partial training: masks are all zeros (no freezing beyond fix flags)
-        Mask = []
-        for name, p in net.named_parameters():
-            Mask.append(np.zeros(p.shape))
+        start_idx = _next_free_run_idx(args.savename)
 
-    # ----------------------
-    # Train and time it
-    # ----------------------
-    start = time.time()
-    (
-        net,
-        loss_list,
-        grad_list,
-        hidden_rep,
-        output_rep,
-        snapshot_epochs,
-        grad_metrics_history,
-        hidden_metrics_history,
-        weight_structure_history,
-        W_hh_history,
-        error_metrics_history,
-    ) = train_partial(
-        X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, Mask, W0
-    )
-    end = time.time()
-    deltat = end - start
-    print("Total training time: {0:.1f} minutes".format(deltat / 60), file=f)
+    for k in range(args.num_runs):
+        # 1) Pick a unique run directory (never overwrite)
+        run_dir, run_idx = _ensure_unique_run_dir(args.savename, start_idx + k)
+        base_stub = os.path.basename(args.savename)
+        savename_run = os.path.join(run_dir, base_stub)  # use this for ALL outputs
 
-    # -----------------
-    # Plot loss curve
-    # -----------------
-    plt.figure()
-    plt.plot(loss_list)
-    plt.title("Loss iteration")
-    plt.savefig(args.savename + ".png")
+        # 2) Per-run seeding so each run is reproducible & distinct
+        set_seed(args.seed + run_idx)
 
-    # -----------------------------------
-    # Save checkpoint + minimal artifacts
-    # -----------------------------------
-    save_dict = {
-        "state_dict": net.state_dict(),
-        "y_hat": np.array(y_hat),  # periodic output snapshots
-        "hidden": np.array(hidden),  # periodic hidden state snapshots
-        "X_mini": X_mini.cpu(),  # inputs (for analysis)
-        "Target_mini": Target_mini.cpu(),  # targets (for analysis)
-        "loss": loss_list,  # scalar training loss per epoch
-        "mean_squared_grads": grad_list,  # simple grad stats list per epoch
-        "grad_metrics": {
-            "history": grad_metrics_history,
-            # Quick series for easy plotting without unpacking:
-            "global_L2_pre": [h["pre"]["global"]["L2"] for h in grad_metrics_history],
-            "global_L2_post": [h["post"]["global"]["L2"] for h in grad_metrics_history],
-            "global_RMS_pre": [h["pre"]["global"]["RMS"] for h in grad_metrics_history],
-            "global_RMS_post": [
-                h["post"]["global"]["RMS"] for h in grad_metrics_history
-            ],
-            # Parameter names & shapes (take from first epoch that had grads):
-            "param_names": list(grad_metrics_history[0]["post"]["groups"].keys())
-            if len(grad_metrics_history) > 0
-            else [],
-            "param_shapes": {
-                k: v["shape"]
-                for k, v in (
-                    grad_metrics_history[0]["post"]["groups"].items()
+        # 3) Open a per-run log file (replaces the old one-off log)
+        global f
+        f = open(savename_run + ".log", "w")
+        print("Settings:", file=f)
+        print(str(sys.argv), file=f)
+        print(f"[run] index={run_idx}, seed={args.seed + run_idx}", file=f)
+
+        # ---------------------
+        # Define the network
+        # ---------------------
+        net = ElmanRNN_pytorch_module_v2(N, hidden_N, N)
+
+        # --- override hidden weight from disk (if any) ---
+        if args.whh_type != "none":
+            try:
+                path = _resolve_hidden_path(
+                    hidden_N, args.whh_type, args.whh_norm, args.alpha
+                )
+                print(f"[whh] loading hidden weight from: {path}", file=f)
+                _load_hidden_into_elman(net, path, device=net.rnn.weight_hh_l0.device)
+            except Exception as e:
+                print(f"[whh] WARNING: failed to load init: {e}", file=f)
+        else:
+            print("[whh] using default random init", file=f)
+
+        # Cache initial recurrent matrix (after any override)
+        W0 = net.rnn.weight_hh_l0.detach().cpu().numpy()
+
+        # Optionally change the RNN hidden nonlinearity
+        if args.rnn_act == "relu":
+            net.rnn = nn.RNN(N, hidden_N, 1, batch_first=True, nonlinearity="relu")
+            print("RNN nonlinearity: elementwise relu", file=f)
+
+        # Optionally override output activation
+        if args.ac_output == "tanh":
+            net.act = nn.Tanh()
+            print("Change output activation function to tanh", file=f)
+        elif args.ac_output == "relu":
+            net.act = nn.ReLU()
+            print("Change output activation function to relu", file=f)
+        elif args.ac_output == "sigmoid":
+            net.act = nn.Sigmoid()
+            print("Change output activation function to sigmoid", file=f)
+
+        # ------------------------------
+        # Optional parameter constraints
+        # ------------------------------
+        if args.nobias:
+            for name, p in net.named_parameters():
+                if name == "rnn.bias_hh_l0":
+                    p.requires_grad = False
+                    p.data.fill_(0)
+                    print("Fixing RNN bias to 0", file=f)
+
+        if args.fixi:
+            for name, p in net.named_parameters():
+                if name == "rnn.weight_ih_l0":
+                    if args.fixi == 1:
+                        p.data = torch.ones(p.shape) / (p.shape[0] * p.shape[1])
+                        print("Fixing {} to positive constant".format(name), file=f)
+                    elif args.fixi == 2:
+                        print("Fixing {} to initialization".format(name), file=f)
+                    elif args.fixi == 3:
+                        p.data = p.data + torch.abs(p.data)
+                        print("Fixing {} to positive initiation".format(name), file=f)
+                    p.requires_grad = False
+
+        if args.fixo:
+            for name, p in net.named_parameters():
+                if name == "linear.weight":
+                    if args.fixo == 1:
+                        p.data = torch.ones(p.shape) / (p.shape[0] * p.shape[1])
+                        print("Fixing {} to positive constant".format(name), file=f)
+                    elif args.fixo == 2:
+                        print("Fixing {} to initialization".format(name), file=f)
+                    elif args.fixo == 3:
+                        p.data = p.data + torch.abs(p.data)
+                        print("Fixing {} to positive initiation".format(name), file=f)
+                    p.requires_grad = False
+
+        if args.fixw:
+            for name, p in net.named_parameters():
+                if name == "rnn.weight_hh_l0":
+                    p.requires_grad = False
+                    p.data = torch.rand(p.data.shape) * 2 * 1 / np.sqrt(
+                        N
+                    ) - 1 / np.sqrt(N)
+                    print("Fixing recurrent matrix to a random matrix", file=f)
+                elif name == "rnn.bias_hh_l0":
+                    p.requires_grad = False
+                    p.data.fill_(0)
+                    print("Fixing recurrent bias to 0", file=f)
+
+        # ------------------
+        # Loss & resume
+        # ------------------
+        criterion = nn.MSELoss(reduction="mean")
+
+        if args.resume:
+            if os.path.isfile(args.resume):
+                print("=> loading previous network '{}'".format(args.resume), file=f)
+                checkpoint = torch.load(args.resume)
+                net.load_state_dict(checkpoint["state_dict"])
+                print("=> loaded previous network '{}' ".format(args.resume), file=f)
+            else:
+                print("=> no checkpoint found at '{}'".format(args.resume), file=f)
+
+        # -----------------------
+        # Move to device
+        # -----------------------
+        if args.gpu:
+            print(
+                "Cuda device availability: {}".format(torch.cuda.is_available()), file=f
+            )
+            criterion = criterion.cuda()
+            net = net.cuda()
+            X_mini = X_mini.cuda()
+            Target_mini = Target_mini.cuda()
+            h0 = h0.cuda()
+
+        # ---------------
+        # Optimizer (SGD)
+        # ---------------
+        optimizer = torch.optim.SGD(net.parameters(), lr=lr)
+
+        # ------------------------------------------------
+        # Build parameter masks for partial training (if any)
+        # ------------------------------------------------
+        if args.partial:
+            print("Training sparsity:{}".format(args.partial), file=f)
+            Mask_W = np.random.uniform(0, 1, (hidden_N, hidden_N))
+            Mask_B = np.random.uniform(0, 1, (hidden_N))
+            Mask_W = Mask_W > args.partial
+            Mask_B = Mask_B > args.partial
+
+            if hasattr(args, "nonoverlap") and args.nonoverlap:
+                Mask_W = ~(~(Mask_W) & checkpoint["Mask_W"])
+                Mask_B = ~(~(Mask_B) & checkpoint["Mask_B"])
+
+            Mask = []
+            for name, p in net.named_parameters():
+                if name == "rnn.weight_hh_l0" or name == "hidden_linear.weight":
+                    Mask.append(Mask_W)
+                    print("Partially train RNN weight", file=f)
+                elif name == "rnn.bias_hh_l0" or name == "hidden_linear.bias":
+                    Mask.append(Mask_B)
+                    print("Partially train RNN bias", file=f)
+                else:
+                    Mask.append(np.zeros(p.shape))
+        else:
+            Mask = []
+            for name, p in net.named_parameters():
+                Mask.append(np.zeros(p.shape))
+
+        # ----------------------
+        # Train and time it
+        # ----------------------
+        start = time.time()
+        (
+            net,
+            loss_list,
+            grad_list,
+            hidden_rep,
+            output_rep,
+            snapshot_epochs,
+            grad_metrics_history,
+            hidden_metrics_history,
+            weight_structure_history,
+            W_hh_history,
+            error_metrics_history,
+        ) = train_partial(
+            X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, Mask, W0
+        )
+        end = time.time()
+        deltat = end - start
+        print("Total training time: {0:.1f} minutes".format(deltat / 60), file=f)
+
+        # -----------------
+        # Plot loss curve
+        # -----------------
+        plt.figure()
+        plt.plot(loss_list)
+        plt.title("Loss iteration")
+        plt.savefig(savename_run + ".png")  # <--- use savename_run here
+
+        # -----------------------------------
+        # Save checkpoint + artifacts (PER RUN)
+        # -----------------------------------
+        save_dict = {
+            "state_dict": net.state_dict(),
+            "y_hat": np.array(output_rep),
+            "hidden": np.array(hidden_rep),
+            "X_mini": X_mini.detach().cpu(),
+            "Target_mini": Target_mini.detach().cpu(),
+            "loss": loss_list,
+            "mean_squared_grads": grad_list,
+            "grad_metrics": {
+                "history": grad_metrics_history,
+                "global_L2_pre": [
+                    h["pre"]["global"]["L2"] for h in grad_metrics_history
+                ],
+                "global_L2_post": [
+                    h["post"]["global"]["L2"] for h in grad_metrics_history
+                ],
+                "global_RMS_pre": [
+                    h["pre"]["global"]["RMS"] for h in grad_metrics_history
+                ],
+                "global_RMS_post": [
+                    h["post"]["global"]["RMS"] for h in grad_metrics_history
+                ],
+                "param_names": list(grad_metrics_history[0]["post"]["groups"].keys())
+                if len(grad_metrics_history) > 0
+                else [],
+                "param_shapes": (
+                    {
+                        k: v["shape"]
+                        for k, v in grad_metrics_history[0]["post"]["groups"].items()
+                    }
                     if len(grad_metrics_history) > 0
                     else {}
-                ).items()
+                ),
             },
-        },
-        "hidden_metrics": {
-            "history": hidden_metrics_history,
-        },
-        "weight_structure": {
-            "history": weight_structure_history,
-        },
-        "weights": {
-            "W_hh_init": W0.astype(np.float16),  # NEW: initial W (compact)
-            "W_hh_history": np.array(
-                W_hh_history, dtype=np.float16
-            ),  # [num_snaps, H, H]
-        },
-        "error_metrics": {
-            "history": error_metrics_history,
-            # quick series for plotting
-            "angle_error_R": [e["angle_error_R"] for e in error_metrics_history],
-            "residual_lag1_autocorr": [
-                e["residual_lag1_autocorr"] for e in error_metrics_history
-            ],
-            "residual_L2_mean": [e["residual_L2_mean"] for e in error_metrics_history],
-        },
-        "n_epochs": int(n_epochs),
-        "args": vars(args),  # (CLI config)
-        "env": env_report(),  # (versions/flags)
-        "rng": rng_snapshot(),  # (resume deterministically)
-        "snapshot_epochs": snapshot_epochs,  # epochs at which hidden/output were recorded
-    }
-    if args.partial:
-        save_dict["Mask_W"] = Mask_W
-        save_dict["Mask_B"] = Mask_B
-    torch.save(save_dict, args.savename + ".pth.tar")
+            "hidden_metrics": {"history": hidden_metrics_history},
+            "weight_structure": {"history": weight_structure_history},
+            "weights": {
+                "W_hh_init": W0.astype(np.float16),
+                "W_hh_history": np.array(W_hh_history, dtype=np.float16),
+            },
+            "error_metrics": {
+                "history": error_metrics_history,
+                "angle_error_R": [e["angle_error_R"] for e in error_metrics_history],
+                "residual_lag1_autocorr": [
+                    e["residual_lag1_autocorr"] for e in error_metrics_history
+                ],
+                "residual_L2_mean": [
+                    e["residual_L2_mean"] for e in error_metrics_history
+                ],
+            },
+            "n_epochs": int(n_epochs),
+            "args": {
+                **vars(args),
+                "run_idx": run_idx,
+            },  # store run_idx for traceability
+            "env": env_report(),
+            "rng": rng_snapshot(),
+            "snapshot_epochs": snapshot_epochs,
+        }
+        if args.partial:
+            save_dict["Mask_W"] = Mask_W
+            save_dict["Mask_B"] = Mask_B
+
+        torch.save(save_dict, savename_run + ".pth.tar")  # <--- use savename_run here
+        f.close()
 
 
 # -------------------------------------------------
@@ -943,31 +1074,35 @@ def _hidden_activation_stats(h_seq, act="tanh", sat_eps=0.95):
 def _temporal_metrics(h_seq):
     """
     Quantify simple temporal metrics from hidden state sequence.
-    Returns simple temporal structure readouts:
-    - lag1_autocorr: average across units of corr(h_t, h_{t+1})
-    - dominant_freq_idx: argmax non-DC FFT bin averaged over units (index)
+    Returns:
+      - lag1_autocorr: average across units of corr(h_t, h_{t+1})
+      - dominant_freq_idx: argmax non-DC FFT bin averaged over units (index)
     """
     h = h_seq.detach()  # [B,T,H]
     B, T, H = h.shape
     if T < 3:
         return {"lag1_autocorr": None, "dominant_freq_idx": None}
-    # center over time per (B,unit)
+
+    # center over time per (B, unit)
     x = h - h.mean(dim=1, keepdim=True)
+
     # lag-1 autocorr
     num = (x[:, :-1, :] * x[:, 1:, :]).sum(dim=1)
     den = (
         x[:, :-1, :].pow(2).sum(dim=1) * x[:, 1:, :].pow(2).sum(dim=1)
     ).sqrt() + 1e-12
     r1 = _nanmean_compat(num / den, dim=0)  # [H]
-    lag1 = float(_nanmean_compat(r1).item())
-    # crude dominant frequency via FFT magnitude (drop DC=0)
-    # average across batch and units
-    X = torch.fft.rfft(x, dim=1)  # [B, F, H]
-    mag = X.abs().mean(dim=0).mean(dim=1)  # [F]
+    lag1 = float(_nanmean_compat(r1).item())  # scalar
+
+    # dominant frequency via 1D RFFT power (drop DC=0)
+    # power: [B, F, H] along time dimension
+    power = _rfft_power_time_compat(x, time_dim=1)  # helper handles old/new torch
+    mag = power.mean(dim=0).mean(dim=1)  # [F], avg over batch & units
     if mag.numel() > 1:
         dom_idx = int(torch.argmax(mag[1:]).item() + 1)
     else:
         dom_idx = None
+
     return {"lag1_autocorr": lag1, "dominant_freq_idx": dom_idx}
 
 
@@ -982,7 +1117,7 @@ def _geometry_metrics(h_seq, max_components=50):
     X = h.reshape(BT, H) - h.reshape(BT, H).mean(dim=0, keepdim=True)
     # cov eigenvalues (use float64 for stability)
     C = (X.T @ X) / max(BT - 1, 1)
-    evals = torch.linalg.eigvalsh(C.to(dtype=torch.float64)).clamp(min=0)
+    evals = _eigvalsh_sym_compat(C.to(dtype=torch.float64)).clamp(min=0)
     s = evals.sum()
     pr = float((s**2 / (evals.pow(2).sum() + 1e-12)).item())  # participation ratio
     # explained variance ratios (first K descending)
@@ -1024,7 +1159,7 @@ def _decode_ring_linear(h_seq, Target_stepwise):
     # closed-form linear reg: W = (X^T X)^-1 X^T Y  (use ridge λ small)
     lam = 1e-6
     XtX = Xc.T @ Xc + lam * torch.eye(Xc.shape[1], device=X.device, dtype=X.dtype)
-    W = torch.linalg.solve(XtX, Xc.T @ Yc)  # [H,2]
+    W = _solve_spd_compat(XtX, Xc.T @ Yc, ridge=1e-6)  # [H,2]
     Yhat = Xc @ W + Y.mean(dim=0, keepdim=True)
     # R^2 per head
     ss_res = ((Y - Yhat) ** 2).sum(dim=0)
@@ -1112,9 +1247,8 @@ def _residual_autocorr(output, Target_stepwise):
     Also returns mean residual L2 for scale context.
     """
     pred = output.detach()
-    # If outputs aren't guaranteed to be probs, just compare raw; that’s fine for trend.
     res = Target_stepwise - pred  # [B, T, N]
-    rnorm = torch.linalg.vector_norm(res, dim=2)  # [B, T]
+    rnorm = _vector_norm_compat(res, dim=2)  # [B, T]  <-- compat (no torch.linalg)
 
     if rnorm.shape[1] < 3:
         return {
@@ -1122,15 +1256,20 @@ def _residual_autocorr(output, Target_stepwise):
             "residual_L2_mean": float(rnorm.mean().item()),
         }
 
-    x = rnorm - rnorm.mean(dim=1, keepdim=True)
+    # center over time per sequence
+    x = rnorm - rnorm.mean(dim=1, keepdim=True)  # [B, T]
+
+    # lag-1 autocorr per sequence, then average across batch
     num = (x[:, :-1] * x[:, 1:]).sum(dim=1)  # [B]
-    den = (
-        torch.sqrt((x[:, :-1] ** 2).sum(dim=1) * (x[:, 1:] ** 2).sum(dim=1)) + 1e-12
-    )  # [B]
-    lag1 = (num / den).mean().item()
+    den = ((x[:, :-1] ** 2).sum(dim=1) * (x[:, 1:] ** 2).sum(dim=1)).sqrt() + 1e-12
+    r1 = num / den  # [B]
+
+    # if you have _nanmean_compat already, this is slightly safer:
+    # lag1 = float(_nanmean_compat(r1).item())
+    lag1 = float(r1.mean().item())
 
     return {
-        "residual_lag1_autocorr": float(lag1),
+        "residual_lag1_autocorr": lag1,
         "residual_L2_mean": float(rnorm.mean().item()),
     }
 
@@ -1143,14 +1282,142 @@ def _vector_norm_compat(x: torch.Tensor, dim=None, keepdim=False, eps=0.0):
 
 
 def _nanmean_compat(x: torch.Tensor, dim=None, keepdim=False):
-    """Mean that ignores NaN/Inf on old torch versions."""
+    """Mean that ignores NaN/Inf; supports dim=None or an int/tuple."""
     mask = torch.isfinite(x)
-    # replace non-finite with 0 for the sum, and divide by count of finite
-    summed = torch.where(mask, x, torch.zeros((), dtype=x.dtype, device=x.device)).sum(
-        dim=dim, keepdim=keepdim
+    x_safe = torch.where(mask, x, torch.zeros((), dtype=x.dtype, device=x.device))
+    if dim is None:
+        summed = x_safe.sum()
+        count = mask.sum()
+    else:
+        summed = x_safe.sum(dim=dim, keepdim=keepdim)
+        count = mask.sum(dim=dim, keepdim=keepdim)
+    return summed / count.clamp(min=1)
+
+
+def _rfft_power_time_compat(x: torch.Tensor, time_dim: int = 1) -> torch.Tensor:
+    """
+    Returns the power spectrum |RFFT|^2 along the time dimension.
+    - Accepts x shaped [..., T, ...] (e.g., [B, T, H] with time_dim=1).
+    - Returns a real tensor with frequencies on the same axis position 'time_dim',
+      i.e., shape is the same as x but with T replaced by F (onesided rfft length).
+    """
+    # Move time_dim to a known position for older torch.rfft or numpy
+    x_moved = x.transpose(time_dim, -1)  # now last dim is time
+    dev = x.device
+    dtype = x.dtype
+
+    # Path 1: modern torch.fft (preferred)
+    if hasattr(torch, "fft") and hasattr(torch.fft, "rfft"):
+        X = torch.fft.rfft(x_moved, dim=-1)  # complex
+        power = X.real * X.real + X.imag * X.imag
+        power = power.transpose(-1, time_dim)  # put freq axis back at time_dim
+        return power
+
+    # Path 2: old torch.rfft (returns last-dim=2 real-imag)
+    if hasattr(torch, "rfft"):
+        # torch.rfft expects transform along the last dim already
+        Xri = torch.rfft(x_moved, 1, normalized=False, onesided=True)  # [..., F, 2]
+        power = Xri[..., 0] ** 2 + Xri[..., 1] ** 2  # [..., F]
+        power = power.transpose(-1, time_dim)  # freq axis back
+        return power
+
+    # Path 3: NumPy fallback (CPU)
+    x_np = x_moved.detach().cpu().numpy()
+    X_np = np.fft.rfft(x_np, axis=-1)  # complex
+    power_np = (X_np.real**2 + X_np.imag**2).astype(np.float32)
+    power = torch.from_numpy(power_np).to(dev)
+    power = power.transpose(-1, time_dim)
+    if power.dtype != dtype and dtype in (torch.float32, torch.float64):
+        power = power.to(dtype)
+    return power
+
+
+def _eigvalsh_sym_compat(C: torch.Tensor) -> torch.Tensor:
+    """
+    Return eigenvalues of a real symmetric matrix C (float64 recommended).
+    Tries torch.linalg.eigh, then torch.symeig, then NumPy.
+    """
+    # enforce symmetry numerically
+    Cs = 0.5 * (C + C.transpose(-1, -2))
+    # Newer Torch path
+    if hasattr(torch, "linalg") and hasattr(torch.linalg, "eigh"):
+        # returns eigenvalues,eigenvectors; we only need eigenvalues
+        evals = torch.linalg.eigh(Cs, UPLO="U").eigenvalues
+        return evals
+    # Older Torch path
+    if hasattr(torch, "symeig"):  # deprecated in new Torch but exists in old
+        evals, _ = torch.symeig(Cs, eigenvectors=False, upper=True)
+        return evals
+    # NumPy fallback
+    vals = np.linalg.eigvalsh(Cs.detach().cpu().numpy()).astype(np.float64)
+    evals = torch.from_numpy(vals).to(device=C.device, dtype=C.dtype)
+    return evals
+
+
+def _solve_spd_compat(A: torch.Tensor, B: torch.Tensor, ridge: float = 1e-6):
+    """
+    Solve (A + ridge*I) X = B for X.
+    Works on old/new Torch; adds small Tikhonov for stability.
+    Assumes A is (approx) symmetric positive semidefinite (like X^T X).
+    """
+    I = torch.eye(A.size(-1), dtype=A.dtype, device=A.device)
+    A_reg = A + ridge * I
+    # Newer torch path
+    if hasattr(torch, "linalg") and hasattr(torch.linalg, "solve"):
+        return torch.linalg.solve(A_reg, B)
+    # Older torch: try inverse, then pinverse
+    try:
+        return torch.inverse(A_reg) @ B
+    except Exception:
+        return torch.pinverse(A_reg) @ B
+
+
+def _run_dir_for(base_savename: str, run_idx: int) -> str:
+    """
+    base_savename: the computed savename (no extension),
+                   e.g. runs/.../shiftmh_n100_fro
+    returns: runs/.../shiftmh_n100_fro/run_00
+    """
+    base_dir = os.path.dirname(base_savename)
+    base_stub = os.path.basename(base_savename)
+    return os.path.join(base_dir, base_stub, f"run_{run_idx:02d}")
+
+
+def _next_free_run_idx(base_savename: str) -> int:
+    """
+    Scan base folder for existing run_XX directories and return the next free index.
+    Robust to gaps (will return max+1).
+    """
+    parent = os.path.join(
+        os.path.dirname(base_savename), os.path.basename(base_savename)
     )
-    count = mask.sum(dim=dim, keepdim=keepdim).clamp(min=1)
-    return summed / count
+    if not os.path.isdir(parent):
+        return 0
+    pat = re.compile(r"^run_(\d+)$")
+    seen = []
+    for name in os.listdir(parent):
+        m = pat.match(name)
+        if m:
+            try:
+                seen.append(int(m.group(1)))
+            except ValueError:
+                pass
+    return (max(seen) + 1) if seen else 0
+
+
+def _ensure_unique_run_dir(base_savename: str, desired_idx: int) -> (str, int):
+    """
+    Try desired_idx; if it exists, bump until a free run_XX is found.
+    Returns (run_dir, final_idx).
+    """
+    idx = max(0, int(desired_idx))
+    while True:
+        run_dir = _run_dir_for(base_savename, idx)
+        try:
+            os.makedirs(run_dir, exist_ok=False)  # fail if exists
+            return run_dir, idx
+        except FileExistsError:
+            idx += 1
 
 
 if __name__ == "__main__":

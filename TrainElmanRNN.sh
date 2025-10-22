@@ -1,11 +1,11 @@
-python Main_clean.py --input data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar --ae 1 --fixi 2 --fixo 2 --pred 1 --n 100 --hidden-n 100 --ac_output sigmoid --epochs 100000 --whh_type none
+python Main_clean.py --input data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar --ae 1 --fixi 2 --fixo 2 --pred 1 --n 100 --hidden-n 100 --ac_output sigmoid --epochs 100000 --whh_type none --num_runs 7
 
 python Main_clean.py \
   --input data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar \
   --ae 1 --fixi 2 --fixo 2 --pred 1 \
   --n 100 --hidden-n 100 --ac_output sigmoid \
-  --epochs 100000 --whh_type none \
-  --num_runs 3
+  --epochs 100000 --whh_type shifted-cyc \
+  --whh_norm frobenius --alpha 0.75 --num_runs 7
 
 # --input: loads training tensors from here (X_mini, Target_mini)
 # --ae 1: sets autoencoder mode (input=output)

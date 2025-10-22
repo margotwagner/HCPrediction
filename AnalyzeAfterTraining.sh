@@ -16,15 +16,21 @@ python Main_clean.py --input data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pt
 # A) Evaluate all runs for the condition
 python evaluate.py \
   --base-dir ./runs/ElmanRNN/random-init/random_n100 \
-  --runs 0-5 \
+  --runs 0-3 \
   --mode all \
   --csv ./runs/ElmanRNN/random-init/random_n100/random_n100_eval.csv
 
 python evaluate.py \
- --base-dir ./runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/sym1p00/shiftcycmh_n100_fro_sym1p00 \
+  --base-dir ./runs/ElmanRNN/shift-variants/identity/frobenius/identity_n100_fro \
+  --runs 0-3 \
+  --mode all \
+  --csv ./runs/ElmanRNN/shift-variants/identity/frobenius/identity_n100_fro/identity_n100_fro_eval.csv
+
+python evaluate.py \
+ --base-dir ./runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/sym0p00/shiftcycmh_n100_fro_sym0p00 \
  --runs 0-2 \
  --mode all \
- --csv runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/sym1p00/shiftcycmh_n100_fro_sym0p00/shiftcycmh_n100_fro_sym1p00_eval.csv
+ --csv runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/sym0p00/shiftcycmh_n100_fro_sym0p00/shiftcycmh_n100_fro_sym0p00_eval.csv
 
 # B) Evaluate a single checkpoint
 #python evaluate.py --ckpt ./runs/ElmanRNN/random-init/random_n100/run_00/#random_n100.pth.tar \
@@ -35,10 +41,16 @@ python offline_metrics.py --ckpt ./runs/ElmanRNN/random-init/random_n100/
 
 python offline_metrics.py --ckpt ./runs/ElmanRNN/mh-variants/shifted-cyc/
 
+python offline_metrics.py --ckpt ./runs/ElmanRNN/shift-variants/identity/
+
 # 4.) Aggregate across runs (condition-level tables)
+python aggregate_metrics.py --root ./runs/ElmanRNN/random-init/random_n100
+
+python aggregate_metrics.py --root ./runs/ElmanRNN/shift-variants/identity/frobenius/identity_n100_fro
+
 python aggregate_metrics.py \
-  --root ./runs/ElmanRNN/random-init/random_n100 \
-  --out ./runs/ElmanRNN/random-init/random_n100/
+  --root "./runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/sym0p50/shiftcycmh_n100_fro_sym0p50" 
+
 
 # 5.) Plot results (example script)
 python make_figures.py \

@@ -42,14 +42,18 @@ python aggregate_metrics.py \
 
 # 5.) Plot results (example script)
 python make_figures.py \
-  --conditions "/runs/ElmanRNN/random-init/random_n100" \
-  --cond_glob "/runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/*/shiftmh_n100_fro" \
+  --conditions "./runs/ElmanRNN/random-init/random_n100" \
+  --cond_glob "./runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/*/shiftmh_n100_fro" \
   --figdir ./figs_compare_shiftedcyc_vs_random \
   --fontsize 12
 
 # 3 explicit
   python make_figures.py \
-  --conditions "/runs/ElmanRNN/random-init/random_n100" \
+  --conditions "./runs/ElmanRNN/random-init/random_n100" \
+  --figdir ./figs_compare --fontsize 12
+
+  python make_figures.py \
+  --agg_dir "./runs/ElmanRNN/random-init/random_n100" \
   --figdir ./figs_compare --fontsize 12
 
 

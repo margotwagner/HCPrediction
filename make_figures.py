@@ -800,12 +800,14 @@ def main(argv=None):
     def want(k):
         return (not requested) or (str(k) in requested)
 
+    print(cs is None)
     if want(1):
         fig_convergence_speed(
             cs,
             os.path.join(args.figdir, "fig1_convergence.png"),
             fontsize=args.fontsize,
         )
+    quit()
     if want(2):
         fig_accuracy_panels(
             cs,

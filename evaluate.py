@@ -97,6 +97,219 @@ def _forward_sequence(state_dict, X: torch.Tensor, saved_args: dict, device: str
     return Y_out.cpu()
 
 
+# ---------- Training-summary writer (reads keys saved by Main_clean.py) ----------
+
+
+def _safe_get(d, *keys, default=None):
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+
+def _last_history_entry(hist_list):
+    if isinstance(hist_list, list) and len(hist_list) > 0:
+        return hist_list[-1]
+    return {}
+
+
+def _write_train_summary(ckpt_path: Path):
+    """
+    Create <stub>_train_summary.csv next to <stub>.pth.tar.
+    Pulls training-time diagnostics saved by Main_clean.py and summarizes them in one row.
+    Safe for Python 3.6.7 / torch 1.4.0.
+    """
+    import csv
+    import os
+    import numpy as np
+    import torch
+
+    ckpt_path = Path(ckpt_path)
+    # Build <stub>_train_summary.csv next to the checkpoint, where <stub> drops ".pth.tar"
+    name = ckpt_path.name
+    if name.endswith(".pth.tar"):
+        stub = name[:-8]  # drop 8 chars: len(".pth.tar") == 8
+    else:
+        # fallback for unusual filenames; removes only the last suffix
+        stub = ckpt_path.stem
+    out_csv = ckpt_path.with_name(stub + "_train_summary.csv")
+
+    # Load checkpoint
+    ckpt = torch.load(str(ckpt_path), map_location="cpu")
+
+    # ---------- Basic run info ----------
+    args_dict = ckpt.get("args", {}) or {}
+    whh_type = args_dict.get("whh_type", "none")
+    whh_norm = args_dict.get("whh_norm", "raw")
+    alpha = args_dict.get("alpha", None)
+    hidden_n = args_dict.get("hidden_n", None)
+    seed = args_dict.get("seed", None)
+    pred = args_dict.get("pred", None)
+    run_tag = args_dict.get("run_tag", "")
+
+    # ---------- Loss curve ----------
+    loss_arr = ckpt.get("loss", None)
+    if loss_arr is None:
+        loss_arr = np.array([], dtype=np.float64)
+    else:
+        loss_arr = np.asarray(loss_arr, dtype=np.float64).ravel()
+
+    n_epochs_logged = int(loss_arr.size)
+    last_epoch = int(n_epochs_logged - 1) if n_epochs_logged > 0 else None
+    last_loss = float(loss_arr[-1]) if n_epochs_logged > 0 else None
+
+    if n_epochs_logged > 0:
+        best_epoch = int(np.nanargmin(loss_arr))
+        best_loss = float(loss_arr[best_epoch])
+        # crude convergence speed: epoch to reach within 1.10 * best
+        thresh = 1.10 * best_loss
+        # first index where loss <= thresh
+        within = np.where(loss_arr <= thresh)[0]
+        conv_epoch_110 = int(within[0]) if within.size > 0 else None
+        loss_auc = float(np.trapz(loss_arr, dx=1.0))
+    else:
+        best_epoch = None
+        best_loss = None
+        conv_epoch_110 = None
+        loss_auc = None
+
+    # ---------- Gradient metrics ----------
+    gm_hist = ckpt.get("grad_metrics", {}).get("history", []) or []
+
+    # helper to pull last/pre/post global L2/RMS if present
+    def _take_grad_stat(which, key):
+        if not gm_hist:
+            return None
+        # use last snapshot in history
+        snap = gm_hist[-1]
+        if which not in snap:
+            return None
+        g = snap[which].get("global", {})
+        return float(g.get(key)) if key in g else None
+
+    global_L2_pre = _take_grad_stat("pre", "L2")
+    global_L2_post = _take_grad_stat("post", "L2")
+    global_RMS_pre = _take_grad_stat("pre", "RMS")
+    global_RMS_post = _take_grad_stat("post", "RMS")
+
+    # ---------- Hidden metrics (last snapshot) ----------
+    hm_hist = ckpt.get("hidden_metrics", {}).get("history", []) or []
+    if hm_hist:
+        hm_last = hm_hist[-1]
+        act = hm_last.get("activation", {}) or {}
+        dyn = hm_last.get("dynamics", {}) or {}
+        geo = hm_last.get("geometry", {}) or {}
+        func = hm_last.get("function", {}) or {}
+        h_mean = _safe_float(act.get("mean"))
+        h_std = _safe_float(act.get("std"))
+        h_sat = _safe_float(act.get("sat_ratio"))
+        h_energy = _safe_float(act.get("energy_L2_mean"))
+        lag1 = _safe_float(dyn.get("lag1_autocorr"))
+        domfreq = _safe_int(dyn.get("dominant_freq_idx"))
+        pr = _safe_float(geo.get("participation_ratio"))
+        r2_ring = _safe_float(func.get("ring_decode_R2"))
+    else:
+        h_mean = h_std = h_sat = h_energy = lag1 = pr = r2_ring = None
+        domfreq = None
+
+    # ---------- Weight structure (last snapshot) ----------
+    ws_hist = ckpt.get("weight_structure", {}).get("history", []) or []
+    if ws_hist:
+        ws_last = ws_hist[-1]
+        fro_W = _safe_float(ws_last.get("fro_W"))
+        fro_S = _safe_float(ws_last.get("fro_S"))
+        fro_A = _safe_float(ws_last.get("fro_A"))
+        sym_ratio = _safe_float(ws_last.get("sym_ratio"))
+        asym_ratio = _safe_float(ws_last.get("asym_ratio"))
+        mix_A_over_S = _safe_float(ws_last.get("mix_A_over_S"))
+        non_normality = _safe_float(ws_last.get("non_normality_commutator"))
+        fro_drift = _safe_float(ws_last.get("fro_drift_W_minus_W0"))
+        rel_drift = _safe_float(ws_last.get("rel_drift_W_minus_W0"))
+    else:
+        fro_W = fro_S = fro_A = sym_ratio = asym_ratio = mix_A_over_S = None
+        non_normality = fro_drift = rel_drift = None
+
+    # ---------- Error-centric metrics (last snapshot) ----------
+    err_hist = ckpt.get("error_metrics", {}).get("history", []) or []
+    if err_hist:
+        err_last = err_hist[-1]
+        angle_R = _safe_float(err_last.get("angle_error_R"))
+        angle_cv = _safe_float(err_last.get("angle_error_circ_var"))
+        res_lag1 = _safe_float(err_last.get("residual_lag1_autocorr"))
+        res_L2 = _safe_float(err_last.get("residual_L2_mean"))
+    else:
+        angle_R = angle_cv = res_lag1 = res_L2 = None
+
+    # ---------- Compose row ----------
+    row = {
+        "ckpt": str(ckpt_path),
+        "whh_type": whh_type,
+        "whh_norm": whh_norm,
+        "alpha": alpha,
+        "hidden_n": hidden_n,
+        "seed": seed,
+        "pred": pred,
+        "run_tag": run_tag,
+        "epochs_logged": n_epochs_logged,
+        "last_epoch": last_epoch,
+        "last_loss": last_loss,
+        "best_epoch": best_epoch,
+        "best_loss": best_loss,
+        "conv_epoch_110pct": conv_epoch_110,
+        "loss_auc": loss_auc,
+        "grad_global_L2_pre": global_L2_pre,
+        "grad_global_L2_post": global_L2_post,
+        "grad_global_RMS_pre": global_RMS_pre,
+        "grad_global_RMS_post": global_RMS_post,
+        "h_mean": h_mean,
+        "h_std": h_std,
+        "h_sat_ratio": h_sat,
+        "h_energy_L2_mean": h_energy,
+        "h_lag1_autocorr": lag1,
+        "h_dom_freq_idx": domfreq,
+        "h_participation_ratio": pr,
+        "h_ring_decode_R2": r2_ring,
+        "fro_W": fro_W,
+        "fro_S": fro_S,
+        "fro_A": fro_A,
+        "sym_ratio": sym_ratio,
+        "asym_ratio": asym_ratio,
+        "mix_A_over_S": mix_A_over_S,
+        "non_normality_commutator": non_normality,
+        "fro_drift_W_minus_W0": fro_drift,
+        "rel_drift_W_minus_W0": rel_drift,
+        "angle_error_R": angle_R,
+        "angle_error_circ_var": angle_cv,
+        "residual_lag1_autocorr": res_lag1,
+        "residual_L2_mean": res_L2,
+    }
+
+    # ---------- Write (append or create) ----------
+    # Always write a single-row CSV per checkpoint (overwrites any existing one)
+    fieldnames = list(row.keys())
+    with open(str(out_csv), "w", newline="") as fw:
+        w = csv.DictWriter(fw, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerow(row)
+    print("[train_summary] wrote:", out_csv)
+
+
+def _safe_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+
+def _safe_int(x):
+    try:
+        return int(x)
+    except Exception:
+        return None
+
+
 # ------------------------- Angle / residual utils -------------------------
 
 
@@ -790,6 +1003,7 @@ def main():
         )
         for ckpt in matched:
             _evaluate_one_ckpt(ckpt, args, csv_path)
+            _write_train_summary(ckpt)
         return
 
     # Decide CSV path
@@ -807,12 +1021,14 @@ def main():
         print(f"[INFO] Found {len(matched)} checkpoints via glob.")
         for ckpt in matched:
             _evaluate_one_ckpt(ckpt, args, csv_path)
+            _write_train_summary(ckpt)
     else:
         if args.ckpt is None:
             raise SystemExit("Provide --ckpt or --glob")
         ckpt_stem = args.ckpt.stem
         default_name = f"{ckpt_stem}_{args.mode}.csv"
         csv_path = Path("./runs_eval") / default_name if args.csv is None else args.csv
+        _write_train_summary(ckpt)
         _evaluate_one_ckpt(args.ckpt, args, csv_path)
 
 

@@ -22,7 +22,7 @@
 #  --base-dir ./runs/ElmanRNN/random-init/random_n100 \
 #  --runs 1-3,7,10-12 \
 #  --mode all \
-#  --csv ./runs_eval/random_n100_all.csv
+#  --csv ./runs_eval/random_n100_eval.csv
 #
 # 2) Evaluate all runs under a base directory
 # python evaluate.py \

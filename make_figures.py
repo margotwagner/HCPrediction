@@ -191,6 +191,25 @@ def load_many_conditions(condition_roots):
     return rl, cs, off, None
 
 
+def _cs_to_wide(cs, value_col="mean"):
+    """
+    Convert tall condition_summary (columns: ['metric','mean','std',...,'condition_id'])
+    into wide format with one row per condition and one column per metric.
+    """
+    if cs is None or not {"metric", value_col}.issubset(set(cs.columns)):
+        return None
+    if "condition_id" not in cs.columns:
+        cs = cs.copy()
+        cs["condition_id"] = "cond"  # fallback if not provided
+    wide = cs.pivot_table(
+        index="condition_id", columns="metric", values=value_col, aggfunc="first"
+    )
+    wide = wide.reset_index()
+    # Ensure column names are plain strings (matplotlib friendly)
+    wide.columns = [str(c) for c in wide.columns]
+    return wide
+
+
 # ---------------------------
 # Matplotlib style utilities
 # ---------------------------
@@ -228,33 +247,59 @@ def _savefig(fig, path):
 
 def fig_convergence_speed(condition_df, savepath=None, fontsize=12):
     """
-    Bar or dot plot of convergence metrics per condition:
-    - Uses columns like: 'final_loss_mean', 'loss_auc_mean' if present.
+    Bar plot of convergence per condition using tall condition_summary.csv:
+    picks one of ['loss_auc', 'final_loss', 'openloop_mse'] from the 'mean' values,
+    and adds error bars (± std) if available.
     """
     if condition_df is None:
         print("[SKIP] fig_convergence_speed: no condition_df")
         return
 
-    # prefer AUC if present, else final_loss
-    metric_name = None
-    for cand in ["loss_auc_mean", "final_loss_mean", "openloop_mse_mean"]:
-        if cand in condition_df.columns:
-            metric_name = cand
-            break
-    if metric_name is None:
-        print("[SKIP] fig_convergence_speed: missing loss metrics")
+    # pivot 'mean' and 'std' to wide
+    csw_mean = _cs_to_wide(condition_df, value_col="mean")
+    if csw_mean is None or csw_mean.empty:
+        print("[SKIP] fig_convergence_speed: could not pivot condition_df (mean)")
+        return
+    csw_std = _cs_to_wide(condition_df, value_col="std")
+    # csw_std may be None/missing; handle gracefully
+
+    # Prefer AUC if present, else final_loss, else openloop_mse
+    candidates = ["loss_auc", "final_loss", "mse_open"]
+    metric = next((m for m in candidates if m in csw_mean.columns), None)
+    if metric is None:
+        print("[SKIP] fig_convergence_speed: missing loss metrics in condition summary")
         return
 
-    df = condition_df.sort_values(metric_name)
-    labels = df.get("condition_id", pd.Series(range(len(df)))).astype(str).tolist()
-    y = df[metric_name].values
+    # Sort by mean metric
+    dfm = csw_mean.sort_values(metric)
+    labels = dfm["condition_id"].astype(str).tolist()
+    x = np.arange(len(labels))
+    y = dfm[metric].values
+
+    # Match std rows to sorted order if available
+    yerr = None
+    if csw_std is not None and metric in csw_std.columns:
+        # align on condition_id
+        dfs = (
+            csw_std.set_index("condition_id").reindex(dfm["condition_id"]).reset_index()
+        )
+        yerr = dfs[metric].values
 
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.bar(range(len(y)), y, width=0.7)
-    ax.set_xticks(range(len(y)))
+    ax.bar(
+        x,
+        y,
+        width=0.7,
+        yerr=yerr,
+        capsize=4,
+        ecolor="black" if yerr is not None else None,
+    )
+    ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=60, ha="right")
-    ttl = "Convergence (lower better): %s" % metric_name
-    _style(ax, fontsize, title=ttl, xlabel="Condition", ylabel=metric_name)
+
+    ttl = "Convergence (lower is better): %s" % metric
+    _style(ax, fontsize, title=ttl, xlabel="Condition", ylabel=metric)
+
     if savepath:
         _savefig(fig, savepath)
     else:
@@ -268,40 +313,48 @@ def fig_convergence_speed(condition_df, savepath=None, fontsize=12):
 
 def fig_accuracy_panels(condition_df, savepath=None, fontsize=12):
     """
-    Multi-panel condition-level metrics if available:
-    - open-loop MSE (lower better)
-    - replay R^2 (higher better)
-    - prediction time-to-divergence (higher better) or phase drift (lower)
-    - closed-loop: mean drift (lower) / TTD (higher)
+    Multi-panel condition-level accuracy using tall condition_summary.csv (means).
+    Panels shown if respective metrics exist:
+      - openloop_mse (↓)
+      - replay_r2 (↑)
+      - prediction_time_to_div (↑)
+      - prediction_phase_drift (↓)
+      - closedloop_time_to_div (↑)
+      - closedloop_phase_drift (↓)
     """
     if condition_df is None:
         print("[SKIP] fig_accuracy_panels: no condition_df")
         return
 
-    keys = [
-        ("openloop_mse_mean", "Open-loop MSE (↓)"),
-        ("replay_r2_mean", "Replay R² (↑)"),
-        ("prediction_time_to_div_mean", "Prediction TTD (↑)"),
-        ("prediction_phase_drift_mean", "Prediction phase drift (↓)"),
-        ("closedloop_time_to_div_mean", "Closed-loop TTD (↑)"),
-        ("closedloop_phase_drift_mean", "Closed-loop phase drift (↓)"),
+    csw = _cs_to_wide(condition_df, value_col="mean")
+    if csw is None or csw.empty:
+        print("[SKIP] fig_accuracy_panels: could not pivot condition_df")
+        return
+
+    panels = [
+        ("mse_open", "Open-loop MSE (↓)"),
+        ("replay_r2", "Replay R² (↑)"),
+        ("time_to_divergence_prediction", "Prediction TTD (↑)"),
+        ("phase_drift_per_step_prediction", "Prediction phase drift (↓)"),
+        ("time_to_divergence_closed", "Closed-loop TTD (↑)"),
+        ("phase_drift_per_step_closed", "Closed-loop phase drift (↓)"),
     ]
-    present = [(k, lab) for (k, lab) in keys if k in condition_df.columns]
+    present = [(k, lab) for (k, lab) in panels if k in csw.columns]
     if not present:
-        print("[SKIP] fig_accuracy_panels: no accuracy columns")
+        print(
+            "[SKIP] fig_accuracy_panels: no accuracy columns found in condition summary"
+        )
         return
 
     n = len(present)
     fig, axes = plt.subplots(1, n, figsize=(4 * n + 2, 4), squeeze=False)
     axr = axes[0]
-
-    df = condition_df.copy()
-    labels = df.get("condition_id", pd.Series(range(len(df)))).astype(str).tolist()
+    labels = csw["condition_id"].astype(str).tolist()
     x = np.arange(len(labels))
 
     for i, (k, lab) in enumerate(present):
         ax = axr[i]
-        y = df[k].values
+        y = csw[k].values
         ax.bar(x, y, width=0.7)
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=60, ha="right")
@@ -800,14 +853,12 @@ def main(argv=None):
     def want(k):
         return (not requested) or (str(k) in requested)
 
-    print(cs is None)
     if want(1):
         fig_convergence_speed(
             cs,
             os.path.join(args.figdir, "fig1_convergence.png"),
             fontsize=args.fontsize,
         )
-    quit()
     if want(2):
         fig_accuracy_panels(
             cs,
@@ -820,6 +871,8 @@ def main(argv=None):
             os.path.join(args.figdir, "fig3_mix_vs_perf.png"),
             fontsize=args.fontsize,
         )
+    print("QUITTING AFTER FIG 1")
+    quit()
     if want(4):
         fig_sprad_vs_perf(
             rl,

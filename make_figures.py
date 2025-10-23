@@ -331,7 +331,7 @@ def fig_accuracy_panels(condition_df, savepath=None, fontsize=12):
     # Define desired panels (title, metric_name)
     panels = [
         ("Open-loop MSE (↓)", "mse_open"),
-        ("Prediction: time-to-divergence (↑)", "prediction_time_to_divergence"),
+        ("Prediction: time-to-divergence (↑)", "time_to_divergence_prediction"),
         ("Angle concentration R (open) (↑)", "angle_error_R_open"),
         ("Mean output corr (open) (↑)", "mean_corr_open"),
         ("Replay ring-decode R² (↑)", "replay_r2_replay"),

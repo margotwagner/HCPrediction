@@ -313,52 +313,83 @@ def fig_convergence_speed(condition_df, savepath=None, fontsize=12):
 
 def fig_accuracy_panels(condition_df, savepath=None, fontsize=12):
     """
-    Multi-panel condition-level accuracy using tall condition_summary.csv (means).
-    Panels shown if respective metrics exist:
-      - openloop_mse (↓)
-      - replay_r2 (↑)
-      - prediction_time_to_div (↑)
-      - prediction_phase_drift (↓)
-      - closedloop_time_to_div (↑)
-      - closedloop_phase_drift (↓)
+    Bar panels (mean ± std) pulled from tall condition_summary.csv
+    Required columns: ['condition_id','metric','mean','std'].
+
+    Panels shown if present:
+      - mse_open (↓)
+      - prediction_time_to_divergence (↑)
+      - angle_error_R_open (↑)
+      - mean_corr_open (↑)
+      - replay_r2_replay (↑)
     """
-    if condition_df is None:
+    req = {"metric", "mean", "std"}
+    if condition_df is None or not req.issubset(condition_df.columns):
         print("[SKIP] fig_accuracy_panels: no condition_df")
         return
 
-    csw = _cs_to_wide(condition_df, value_col="mean")
-    if csw is None or csw.empty:
+    # Define desired panels (title, metric_name)
+    panels = [
+        ("Open-loop MSE (↓)", "mse_open"),
+        ("Prediction: time-to-divergence (↑)", "prediction_time_to_divergence"),
+        ("Angle concentration R (open) (↑)", "angle_error_R_open"),
+        ("Mean output corr (open) (↑)", "mean_corr_open"),
+        ("Replay ring-decode R² (↑)", "replay_r2_replay"),
+    ]
+
+    csw_mean = _cs_to_wide(condition_df, value_col="mean")
+    csw_std = _cs_to_wide(condition_df, value_col="std")
+    if csw_mean is None or csw_mean.empty:
         print("[SKIP] fig_accuracy_panels: could not pivot condition_df")
         return
 
-    panels = [
-        ("mse_open", "Open-loop MSE (↓)"),
-        ("replay_r2", "Replay R² (↑)"),
-        ("time_to_divergence_prediction", "Prediction TTD (↑)"),
-        ("phase_drift_per_step_prediction", "Prediction phase drift (↓)"),
-        ("time_to_divergence_closed", "Closed-loop TTD (↑)"),
-        ("phase_drift_per_step_closed", "Closed-loop phase drift (↓)"),
-    ]
-    present = [(k, lab) for (k, lab) in panels if k in csw.columns]
-    if not present:
-        print(
-            "[SKIP] fig_accuracy_panels: no accuracy columns found in condition summary"
-        )
-        return
-
-    n = len(present)
-    fig, axes = plt.subplots(1, n, figsize=(4 * n + 2, 4), squeeze=False)
-    axr = axes[0]
-    labels = csw["condition_id"].astype(str).tolist()
+    labels = csw_mean["condition_id"].astype(str).tolist()
     x = np.arange(len(labels))
 
-    for i, (k, lab) in enumerate(present):
-        ax = axr[i]
-        y = csw[k].values
-        ax.bar(x, y, width=0.7)
+    # Keep only panels that actually exist in the table
+    panels = [(t, m) for (t, m) in panels if m in csw_mean.columns]
+    if not panels:
+        print("[SKIP] fig_accuracy_panels: none of the requested metrics are present")
+        return
+
+    # Dynamic grid (rows x cols)
+    import math
+
+    n = len(panels)
+    cols = 3
+    rows = int(math.ceil(n / float(cols)))
+
+    fig, axs = plt.subplots(rows, cols, figsize=(4 * cols, 3.2 * rows))
+    axs = np.array(axs).reshape(-1)  # flatten
+
+    for i, (title, metric) in enumerate(panels):
+        ax = axs[i]
+        means = csw_mean.set_index("condition_id")[metric].reindex(labels).values
+        yerr = None
+        if csw_std is not None and metric in csw_std.columns:
+            yerr = csw_std.set_index("condition_id")[metric].reindex(labels).values
+
+        ax.bar(
+            x, means, width=0.75, yerr=yerr, capsize=4, linewidth=0.8, edgecolor="black"
+        )
         ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=60, ha="right")
-        _style(ax, fontsize, title=lab, xlabel="Condition")
+        ax.set_xticklabels(
+            labels, rotation=30, ha="right", fontsize=max(8, int(fontsize * 0.85))
+        )
+        ax.set_title(title, fontsize=fontsize)
+        ax.grid(axis="y", linestyle=":", alpha=0.4)
+
+        if (
+            metric == "mse_open"
+        ):  # lower is better → invert for visual “higher bar = better”
+            ax.set_ylim(bottom=0)
+            ax.invert_yaxis()
+
+    # Hide any leftover empty axes
+    for j in range(i + 1, rows * cols):
+        axs[j].axis("off")
+
+    fig.tight_layout()
     if savepath:
         _savefig(fig, savepath)
     else:
@@ -871,7 +902,7 @@ def main(argv=None):
             os.path.join(args.figdir, "fig3_mix_vs_perf.png"),
             fontsize=args.fontsize,
         )
-    print("QUITTING AFTER FIG 1")
+    print("QUITTING AFTER FIG 3")
     quit()
     if want(4):
         fig_sprad_vs_perf(

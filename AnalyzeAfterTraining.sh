@@ -16,7 +16,7 @@ python Main_clean.py --input data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pt
 # A) Evaluate all runs for the condition
 python evaluate.py \
   --base-dir ./runs/ElmanRNN/random-init/random_n100 \
-  --runs 0-3 \
+  --runs 0-5 \
   --mode all \
   --csv ./runs/ElmanRNN/random-init/random_n100/random_n100_eval.csv
 
@@ -60,13 +60,11 @@ python make_figures.py \
   --fontsize 12
 
 # 3 explicit
-  python make_figures.py \
-  --conditions "./runs/ElmanRNN/random-init/random_n100" \
-  --figdir ./figs_compare --fontsize 12
+python make_figures.py --conditions "./runs/ElmanRNN/random-init/random_n100" --figdir ./figs_compare --fontsize 12
 
-  python make_figures.py \
-  --agg_dir "./runs/ElmanRNN/random-init/random_n100" \
-  --figdir ./figs_compare --fontsize 12
+python make_figures.py \
+--agg_dir "./runs/ElmanRNN/random-init/random_n100" \
+--figdir ./figs_compare --fontsize 12
 
 
 # 6.) Supplementary analyses (example script)

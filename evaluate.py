@@ -311,6 +311,25 @@ def _safe_int(x):
 
 
 # ------------------------- Angle / residual utils -------------------------
+def _cossin_from_dist(P):  # P: [B,T,N] probs (nonneg, sum=1)
+    B, T, N = P.shape
+    idx = torch.arange(N, device=P.device)
+    theta = 2 * math.pi * idx / float(N)
+    cos_th, sin_th = torch.cos(theta), torch.sin(theta)
+    C = (P * cos_th).sum(dim=2)  # [B,T]
+    S = (P * sin_th).sum(dim=2)  # [B,T]
+    return C, S
+
+
+def _r2_twohead(Ytrue, Ypred):  # Y*: [B,T,2]
+    # flatten over batch/time
+    Yt = Ytrue.reshape(-1, 2)
+    Yp = Ypred.reshape(-1, 2)
+    mu = Yt.mean(dim=0, keepdim=True)
+    ss_res = ((Yt - Yp) ** 2).sum(dim=0)  # per head
+    ss_tot = ((Yt - mu) ** 2).sum(dim=0) + 1e-12
+    r2 = 1.0 - ss_res / ss_tot  # per head
+    return float(r2.mean().item())  # average two heads
 
 
 def _normalize_distribution(x: torch.Tensor, dim=-1, eps=1e-12):
@@ -542,6 +561,7 @@ def evaluate_open(ckpt_path, device="cpu", data_path=None):
     out["angle_error_R_free"] = out["angle_error_circ_var_free"] = ""
     out["residual_lag1_autocorr_free"] = out["residual_L2_mean_free"] = ""
     out["ring_decode_R2_free"] = ""
+    out["replay_r2"] = ""
     return out
 
 
@@ -571,6 +591,18 @@ def evaluate_replay(ckpt_path, device="cpu", noise_scale=0.01):
     out.update(_angle_error_concentration(Y_out, Y_true))
     out.update(_residual_stats(Y_out, Y_true))
     out.update(_ring_decode_r2_from_outputs(Y_out, Y_true))
+    # --- replay_r2 (cos/sin variance explained on ring) ---
+    # Normalize outputs to probabilities (per time step)
+    pred = Y_out.detach().clamp_min(0)
+    pred = pred / (pred.sum(dim=2, keepdim=True) + 1e-12)
+
+    # Targets are already distributions
+    Ct, St = _cossin_from_dist(Y_true)  # [B,T], [B,T]
+    Cp, Sp = _cossin_from_dist(pred)  # [B,T], [B,T]
+
+    Y_true_cs = torch.stack([Ct, St], dim=2)  # [B,T,2]
+    Y_pred_cs = torch.stack([Cp, Sp], dim=2)  # [B,T,2]
+    out["replay_r2"] = _r2_twohead(Y_true_cs, Y_pred_cs)
     out["time_to_divergence"] = ""
     out["phase_drift_per_step"] = ""
     out["mse_free"] = out["mean_corr_free"] = ""
@@ -631,6 +663,7 @@ def evaluate_prediction(
     out["angle_error_R_free"] = out["angle_error_circ_var_free"] = ""
     out["residual_lag1_autocorr_free"] = out["residual_L2_mean_free"] = ""
     out["ring_decode_R2_free"] = ""
+    out["replay_r2"] = ""
     return out
 
 
@@ -707,6 +740,7 @@ def evaluate_closed(
         out["angle_error_R_free"] = out["angle_error_circ_var_free"] = ""
         out["residual_lag1_autocorr_free"] = out["residual_L2_mean_free"] = ""
         out["ring_decode_R2_free"] = ""
+    out["replay_r2"] = ""
 
     return out
 
@@ -736,6 +770,7 @@ def _write_csv(row_dict: dict, csv_path: Path):
         "residual_lag1_autocorr",
         "residual_L2_mean",
         "ring_decode_R2",
+        "replay_r2",
         # dynamics
         "time_to_divergence",
         "phase_drift_per_step",

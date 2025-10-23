@@ -6,3 +6,4 @@ nohup.out
 SymAsymRNN
 runs
 runs_eval
+figs*

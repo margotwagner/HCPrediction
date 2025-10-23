@@ -1,0 +1,5 @@
+key_name,human_readable,description
+eigs,Eigenvalues(W) per snapshot,"Array shape [num_snaps, H] (complex). Each row i holds eigenvalues of W at snapshot i; padded with NaN + iNaN as needed."
+svals,Singular values(W) per snapshot,"Array shape [num_snaps, H] (float32). Each row i holds singular values σ of W at snapshot i."
+snapshot_idx,Snapshot indices,[num_snaps] (int32). 0…N−1 (0 == init). Matches CSV snapshot_idx.
+epoch,Epoch per snapshot,[num_snaps] (int32). Training epoch aligned to each snapshot; matches CSV epoch.

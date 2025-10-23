@@ -1,0 +1,48 @@
+column_name,human_readable,description
+condition_dir,Condition Folder,Absolute or relative path of the condition directory (parent of run_XX).
+run_dir,Run Folder,Absolute or relative path of the run directory (…/run_XX).
+run_id,Run ID,Numeric run identifier parsed from run_XX.
+offline_csv,Offline Metrics CSV Path,Path to the *_offline_metrics.csv used to summarize init/last snapshots for this run.
+init_fro_W,Init ||W||_F,Frobenius norm of the recurrent matrix W at initialization.
+last_fro_W,Final ||W||_F,Frobenius norm of W at last snapshot (latest epoch).
+delta_fro_W,Δ ||W||_F,Change in Frobenius norm from init to last (last - init).
+init_fro_S,Init ||S||_F,Frobenius norm of the symmetric component S = (W+Wᵀ)/2 at initialization.
+last_fro_S,Final ||S||_F,Frobenius norm of S at last snapshot.
+delta_fro_S,Δ ||S||_F,Change in ||S||_F (last - init).
+init_fro_A,Init ||A||_F,Frobenius norm of the antisymmetric component A = (W−Wᵀ)/2 at initialization.
+last_fro_A,Final ||A||_F,Frobenius norm of A at last snapshot.
+delta_fro_A,Δ ||A||_F,Change in ||A||_F (last - init).
+init_mix_A_over_S,Init A/S Mix,Mixing ratio ||A||_F / (||S||_F + ε) at initialization.
+last_mix_A_over_S,Final A/S Mix,Mixing ratio at last snapshot.
+delta_mix_A_over_S,Δ A/S Mix,Change in mixing ratio (last - init).
+init_sym_ratio,Init Symmetry Ratio,||S||_F / (||W||_F + ε) at initialization.
+last_sym_ratio,Final Symmetry Ratio,Symmetry ratio at last snapshot.
+delta_sym_ratio,Δ Symmetry Ratio,Change in symmetry ratio (last - init).
+init_asym_ratio,Init Asymmetry Ratio,||A||_F / (||W||_F + ε) at initialization.
+last_asym_ratio,Final Asymmetry Ratio,Asymmetry ratio at last snapshot.
+delta_asym_ratio,Δ Asymmetry Ratio,Change in asymmetry ratio (last - init).
+init_non_normality_comm,Init Non-normality,||WWᵀ − WᵀW||_F at initialization.
+last_non_normality_comm,Final Non-normality,Non-normality at last snapshot.
+delta_non_normality_comm,Δ Non-normality,Change in non-normality (last - init).
+init_spectral_radius_W,Init Spectral Radius (W),Max eigenvalue magnitude of W at initialization.
+last_spectral_radius_W,Final Spectral Radius (W),Max eigenvalue magnitude at last snapshot.
+delta_spectral_radius_W,Δ Spectral Radius (W),Change in spectral radius of W (last - init).
+init_op_norm_2,Init Operator Norm (W),Spectral norm (largest singular value) of W at initialization.
+last_op_norm_2,Final Operator Norm (W),Spectral norm at last snapshot.
+delta_op_norm_2,Δ Operator Norm (W),Change in operator norm (last - init).
+init_cond_number,Init Condition Number (W),κ(W) = σ_max / σ_min at initialization (regularized if needed).
+last_cond_number,Final Condition Number (W),Condition number at last snapshot.
+delta_cond_number,Δ Condition Number (W),Change in condition number (last - init).
+init_spectral_radius_S,Init Spectral Radius (S),Max eigenvalue magnitude of S at initialization.
+last_spectral_radius_S,Final Spectral Radius (S),Max eigenvalue magnitude of S at last snapshot.
+delta_spectral_radius_S,Δ Spectral Radius (S),Change in spectral radius of S (last - init).
+init_spectral_radius_A,Init Spectral Radius (A),Max eigenvalue magnitude of A at initialization.
+last_spectral_radius_A,Final Spectral Radius (A),Max eigenvalue magnitude of A at last snapshot.
+delta_spectral_radius_A,Δ Spectral Radius (A),Change in spectral radius of A (last - init).
+init_epoch,Init Epoch,Epoch index of the initialization snapshot (often 0 or NaN).
+last_epoch,Final Epoch,Epoch index of the last snapshot used for summary.
+replay_*,Replay Metric (*),"Any numeric column from replay evaluation, prefixed with 'replay_'. Example: replay_mse, replay_ring_decode_R2."
+prediction_*,Prediction Metric (*),"Any numeric column from prediction evaluation, prefixed with 'prediction_'. Example: prediction_time_to_divergence, prediction_phase_drift."
+openloop_*,Open-loop Metric (*),"Any numeric column from open-loop evaluation, prefixed with 'openloop_'. Example: openloop_mse, openloop_angle_error_R."
+closedloop_*,Closed-loop Metric (*),"Any numeric column from closed-loop evaluation, prefixed with 'closedloop_'. Example: closedloop_mse, closedloop_divergence_time."
+eval_*,Generic Eval Metric (*),Fallback prefix when mode not inferred from filename; contains numeric columns from the evaluation CSV.

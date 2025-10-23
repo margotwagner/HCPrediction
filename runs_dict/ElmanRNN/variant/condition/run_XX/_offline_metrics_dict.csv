@@ -1,0 +1,18 @@
+column_name,human_readable,description
+snapshot_idx,Snapshot index,0 = initial W_hh; 1… = subsequent saved snapshots.
+epoch,Training epoch,Epoch aligned to each snapshot (init is 0).
+fro_W,‖W‖_F,Frobenius norm of recurrent weight W.
+fro_S,‖S‖_F (symmetric),Frobenius norm of S = 0.5*(W + Wᵀ).
+fro_A,‖A‖_F (skew/antisymmetric),Frobenius norm of A = 0.5*(W − Wᵀ).
+mix_A_over_S,Mixing ratio A/S,‖A‖_F / (‖S‖_F + ε); larger ⇒ more antisymmetric content.
+sym_ratio,Symmetry fraction,‖S‖_F / (‖W‖_F + ε); fraction of W’s energy that is symmetric.
+asym_ratio,Antisymmetry fraction,‖A‖_F / (‖W‖_F + ε).
+non_normality_comm,Non-normality (commutator),‖(W Wᵀ − Wᵀ W)‖_F; 0 if W is normal (commutes with its transpose).
+spectral_radius_W,Spectral radius(W),max |λ_i(W)|; falls back to power-iteration proxy if full eig fails.
+op_norm_2,Operator norm (σ_max),Largest singular value of W.
+cond_number,Condition number,"σ_max / max(σ_min, ε) from SVD."
+spectral_radius_S,Spectral radius(S),max |λ_i(S)| for symmetric part S.
+spectral_radius_A,Spectral radius(A),max |λ_i(A)| for antisymmetric part A (equals max imaginary magnitude for ideal skew-symmetric).
+ps_frac_eps1e-1,Pseudospectrum fraction (ε=1e−1),Fraction of sampled grid points with min σ(zI−W) < 1e−1 (only if --grid_ps enabled).
+ps_frac_eps5e-2,Pseudospectrum fraction (ε=5e−2),Fraction with min σ(zI−W) < 5e−2 (only if --grid_ps enabled).
+ps_frac_eps1e-2,Pseudospectrum fraction (ε=1e−2),Fraction with min σ(zI−W) < 1e−2 (only if --grid_ps enabled).

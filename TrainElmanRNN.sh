@@ -7,7 +7,7 @@ python Main_clean.py \
   --ae 1 --fixi 2 --fixo 2 --pred 1 \
   --n 100 --hidden-n 100 --ac_output sigmoid \
   --epochs 100000 --whh_type shift \
-  --whh_norm frobenius --alpha 0.25 --num_runs 3
+  --whh_norm frobenius --alpha 1.0 --num_runs 3
 
 # --input: loads training tensors from here (X_mini, Target_mini)
 # --ae 1: sets autoencoder mode (input=output)

@@ -1,0 +1,7 @@
+column_name,human_readable,description
+epoch,Epoch,Snapshot epoch index (aligned with saved hidden/output snapshots).
+fro_W,‖W‖_F (Frobenius of W_hh),Frobenius norm of the recurrent matrix W_hh at this snapshot.
+fro_S,‖S‖_F (symmetric part),Frobenius norm of S = 0.5·(W + Wᵀ) at this snapshot.
+fro_A,‖A‖_F (antisymmetric part),Frobenius norm of A = 0.5·(W − Wᵀ) at this snapshot.
+non_normality_commutator,Non-normality (commutator norm),"‖ W Wᵀ − Wᵀ W ‖_F, a measure of non-normality of W_hh at this snapshot."
+spectral_radius,Spectral radius,Max |λ_i(W_hh)| computed from the saved snapshot matrix.

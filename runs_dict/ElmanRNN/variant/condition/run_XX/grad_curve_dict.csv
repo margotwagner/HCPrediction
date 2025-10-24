@@ -1,0 +1,6 @@
+column_name,human_readable,description
+epoch,Epoch,Snapshot epoch index (when gradient metrics were logged).
+grad_L2_pre,Grad L2 (pre-clip),Global L2 norm of gradients before any clipping/masking at this snapshot.
+grad_RMS_pre,Grad RMS (pre-clip),Global RMS of gradients before clipping/masking at this snapshot.
+grad_L2_post,Grad L2 (post-clip),Global L2 norm of gradients after clipping/masking at this snapshot.
+grad_RMS_post,Grad RMS (post-clip),Global RMS of gradients after clipping/masking at this snapshot.

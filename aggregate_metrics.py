@@ -27,9 +27,18 @@ import os
 import glob
 import json
 import csv
+import re
 
 import numpy as np
 import pandas as pd
+
+
+def _parse_run_id(run_dir):
+    """Extract integer run id from a folder name like 'run_03'. Return None if not found."""
+    if not isinstance(run_dir, str):
+        return None
+    m = re.search(r"run_(\d+)", run_dir)
+    return int(m.group(1)) if m else None
 
 
 def _is_dir(p):
@@ -96,9 +105,13 @@ def _collect_eval_rows(condition_root):
                         break
                 run_dirs.append(r)
             df["run_dir"] = run_dirs
+            df["run_id"] = df["run_dir"].apply(_parse_run_id)
+
         else:
             # If no ckpt column, try to infer run_dir as NaN (will be merged sparsely)
             df["run_dir"] = np.nan
+            df["run_id"] = np.nan
+
         # If there's a 'mode' column (open_loop, replay, prediction, closed_loop), we keep it for pivot
         dfs.append(df)
 
@@ -120,6 +133,9 @@ def _collect_eval_rows(condition_root):
         # Flatten MultiIndex columns: (metric, mode) -> f"{metric}_{mode}"
         wide.columns = ["%s_%s" % (c[0], c[1]) for c in wide.columns.to_flat_index()]
         wide = wide.reset_index()
+        # Add numeric run_id extracted from run_dir
+        if "run_dir" in wide.columns:
+            wide["run_id"] = wide["run_dir"].apply(_parse_run_id)
         return wide, stub
 
     # No mode column; we just keep as-is (but ensure run_dir present).
@@ -142,6 +158,7 @@ def _collect_train_summary(condition_root):
             continue
         df = df.copy()
         df["run_dir"] = os.path.basename(r)
+        df["run_id"] = df["run_dir"].apply(_parse_run_id)
         rows.append(df)
 
     if not rows:
@@ -167,6 +184,7 @@ def _collect_offline_metrics(condition_root):
             continue
         df = df.copy()
         df["run_dir"] = os.path.basename(r)
+        df["run_id"] = df["run_dir"].apply(_parse_run_id)
         rows.append(df)
 
     if not rows:
@@ -209,13 +227,19 @@ def _write_condition_outputs(condition_root, run_level_df):
     run_level_csv = os.path.join(condition_root, "run_level.csv")
     # Reorder: run_dir first if present
     cols = run_level_df.columns.tolist()
-    if "run_dir" in cols:
-        cols.remove("run_dir")
-        cols = ["run_dir"] + cols
+    front = []
+    for key in ["run_id", "run_dir"]:
+        if key in cols:
+            cols.remove(key)
+            front.append(key)
+    cols = front + cols
     run_level_df[cols].to_csv(run_level_csv, index=False)
 
     # Compute means and stds across runs for numeric cols
     num_cols = run_level_df.select_dtypes(include=[np.number]).columns.tolist()
+    # Do not average over run_id
+    if "run_id" in num_cols:
+        num_cols.remove("run_id")
     if not num_cols:
         # Nothing numeric to summarize; write empty condition_summary with headers
         cond_csv = os.path.join(condition_root, "condition_summary.csv")

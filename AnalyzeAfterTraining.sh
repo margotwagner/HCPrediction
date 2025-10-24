@@ -56,7 +56,7 @@ python aggregate_metrics.py \
 python make_figures.py \
   --conditions "./runs/ElmanRNN/random-init/random_n100" \
   --cond_glob "./runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/*/shiftmh_n100_fro" \
-  --figdir ./figs_compare_shiftedcyc_vs_random \
+  --figdir ./figs_compare_shiftedcyc_vs_random \g
   --fontsize 12
 
 # 3 explicit

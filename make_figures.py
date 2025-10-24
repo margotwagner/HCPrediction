@@ -32,10 +32,11 @@ import glob
 import json
 import math
 import argparse
-
+import re
 import numpy as np
 import pandas as pd
 import matplotlib
+from pathlib import Path
 
 matplotlib.use("Agg")  # safe for headless
 import matplotlib.pyplot as plt
@@ -210,6 +211,21 @@ def _cs_to_wide(cs, value_col="mean"):
     return wide
 
 
+def _alpha_from_condition_id(cid):
+    """
+    Extract alpha from condition_id strings that contain 'symXpYY' (e.g., 'sym0p90').
+    Returns float in [0,1] or None if not found.
+    """
+    if cid is None:
+        return None
+    m = re.search(r"sym(\d+)p(\d{2})", str(cid))
+    if not m:
+        return None
+    major = int(m.group(1))
+    minor = int(m.group(2))
+    return major + minor / 100.0
+
+
 # ---------------------------
 # Matplotlib style utilities
 # ---------------------------
@@ -245,61 +261,123 @@ def _savefig(fig, path):
 # ---------------------------
 
 
-def fig_convergence_speed(condition_df, savepath=None, fontsize=12):
-    """
-    Bar plot of convergence per condition using tall condition_summary.csv:
-    picks one of ['loss_auc', 'final_loss', 'openloop_mse'] from the 'mean' values,
-    and adds error bars (± std) if available.
-    """
-    if condition_df is None:
-        print("[SKIP] fig_convergence_speed: no condition_df")
-        return
+def _gather_series(condition_roots, pattern):
+    """Collect per-run timeseries matching a filename pattern under each condition root.
+    Returns dict: {cond_id: [DataFrame_per_run_with_epoch_index, ...]}."""
+    import glob, os
+    import pandas as pd
 
-    # pivot 'mean' and 'std' to wide
-    csw_mean = _cs_to_wide(condition_df, value_col="mean")
-    if csw_mean is None or csw_mean.empty:
-        print("[SKIP] fig_convergence_speed: could not pivot condition_df (mean)")
-        return
-    csw_std = _cs_to_wide(condition_df, value_col="std")
-    # csw_std may be None/missing; handle gracefully
+    out = {}
+    for root in condition_roots:
+        cond_id = _infer_condition_id_from_root(root)
+        paths = glob.glob(os.path.join(root, "run_*", pattern))
+        runs = []
+        for p in sorted(paths):
+            df = _read_csv_safe(p)
+            if df is None or "epoch" not in df.columns:
+                continue
+            df = df.sort_values("epoch").set_index("epoch")
+            runs.append(df)
+        if runs:
+            out[cond_id] = runs
+    return out
 
-    # Prefer AUC if present, else final_loss, else openloop_mse
-    candidates = ["loss_auc", "final_loss", "mse_open"]
-    metric = next((m for m in candidates if m in csw_mean.columns), None)
-    if metric is None:
-        print("[SKIP] fig_convergence_speed: missing loss metrics in condition summary")
-        return
 
-    # Sort by mean metric
-    dfm = csw_mean.sort_values(metric)
-    labels = dfm["condition_id"].astype(str).tolist()
-    x = np.arange(len(labels))
-    y = dfm[metric].values
+def _mean_sem_align(dfs, col):
+    """Align on union of epochs; return (epochs, mean, sem)."""
+    import pandas as pd, numpy as np
 
-    # Match std rows to sorted order if available
-    yerr = None
-    if csw_std is not None and metric in csw_std.columns:
-        # align on condition_id
-        dfs = (
-            csw_std.set_index("condition_id").reindex(dfm["condition_id"]).reset_index()
-        )
-        yerr = dfs[metric].values
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.bar(
-        x,
-        y,
-        width=0.7,
-        yerr=yerr,
-        capsize=4,
-        ecolor="black" if yerr is not None else None,
+    if not dfs:
+        return None, None, None
+    # outer-join on epoch
+    aligned = pd.concat([d[col] for d in dfs if col in d.columns], axis=1)
+    aligned = aligned.sort_index()
+    vals = aligned.values  # [T, R]
+    mean = np.nanmean(vals, axis=1)
+    sem = np.nanstd(vals, axis=1, ddof=1) / np.sqrt(
+        np.sum(np.isfinite(vals), axis=1).clip(min=1)
     )
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=60, ha="right")
+    return aligned.index.values, mean, sem
 
-    ttl = "Convergence (lower is better): %s" % metric
-    _style(ax, fontsize, title=ttl, xlabel="Condition", ylabel=metric)
 
+def fig1_training_dynamics(condition_roots, savepath=None, fontsize=12):
+    """
+    Fig 1 (2x2):
+      A: loss vs epoch
+      B: grad L2 (post) vs epoch
+      C: spectral radius vs epoch
+      D: Frobenius norm vs epoch
+    """
+    L = _gather_series(condition_roots, "*_loss_curve.csv")
+    G = _gather_series(condition_roots, "*_grad_curve.csv")
+    W = _gather_series(condition_roots, "*_wstruct_curve.csv")
+    if not (L or G or W):
+        print("[SKIP] fig1_training_dynamics: no per-run series found")
+        return
+
+    fig, axs = plt.subplots(2, 2, figsize=(12, 8))
+    (axA, axB), (axC, axD) = axs
+
+    # Panel A: loss
+    for cond, runs in L.items():
+        x, m, s = _mean_sem_align(runs, "loss")
+        if x is None:
+            continue
+        axA.plot(x, m, lw=2, label=cond)
+        axA.fill_between(x, m - s, m + s, alpha=0.2)
+    _style(
+        axA, fontsize, title="Loss vs epoch", xlabel="epoch", ylabel="loss", legend=True
+    )
+
+    # Panel B: grad L2 (post)
+    for cond, runs in G.items():
+        x, m, s = _mean_sem_align(runs, "grad_L2_post")
+        if x is None:
+            continue
+        axB.plot(x, m, lw=2, label=cond)
+        axB.fill_between(x, m - s, m + s, alpha=0.2)
+    _style(
+        axB,
+        fontsize,
+        title="Grad L2 (post) vs epoch",
+        xlabel="epoch",
+        ylabel="‖∇‖₂",
+        legend=True,
+    )
+
+    # Panel C: spectral radius
+    for cond, runs in W.items():
+        x, m, s = _mean_sem_align(runs, "spectral_radius")
+        if x is None:
+            continue
+        axC.plot(x, m, lw=2, label=cond)
+        axC.fill_between(x, m - s, m + s, alpha=0.15)
+    _style(
+        axC,
+        fontsize,
+        title="Spectral radius ρ(W)",
+        xlabel="epoch",
+        ylabel="ρ(W)",
+        legend=True,
+    )
+
+    # Panel D: Frobenius norm
+    for cond, runs in W.items():
+        x, m, s = _mean_sem_align(runs, "fro_W")
+        if x is None:
+            continue
+        axD.plot(x, m, lw=2, label=cond)
+        axD.fill_between(x, m - s, m + s, alpha=0.15)
+    _style(
+        axD,
+        fontsize,
+        title="Frobenius ‖W‖_F",
+        xlabel="epoch",
+        ylabel="‖W‖_F",
+        legend=True,
+    )
+
+    fig.tight_layout()
     if savepath:
         _savefig(fig, savepath)
     else:
@@ -311,83 +389,81 @@ def fig_convergence_speed(condition_df, savepath=None, fontsize=12):
 # --------------------------------------------
 
 
-def fig_accuracy_panels(condition_df, savepath=None, fontsize=12):
+def fig2_symmetry_vs_performance(condition_df, savepath=None, fontsize=12):
     """
-    Bar panels (mean ± std) pulled from tall condition_summary.csv
-    Required columns: ['condition_id','metric','mean','std'].
-
-    Panels shown if present:
-      - mse_open (↓)
-      - prediction_time_to_divergence (↑)
-      - angle_error_R_open (↑)
-      - mean_corr_open (↑)
-      - replay_r2_replay (↑)
+    Figure 2: Symmetry–performance relations (two panels, curves vs alpha, ±std).
+      Panel A: mse_open (↓) vs alpha
+      Panel B: best_loss (↓) vs alpha
+    Expects tall condition_summary.csv with columns: ['condition_id','metric','mean','std'].
     """
-    req = {"metric", "mean", "std"}
+    req = {"condition_id", "metric", "mean"}
     if condition_df is None or not req.issubset(condition_df.columns):
-        print("[SKIP] fig_accuracy_panels: no condition_df")
+        print("[SKIP] fig2_symmetry_vs_performance: condition_summary missing columns")
         return
 
-    # Define desired panels (title, metric_name)
-    panels = [
-        ("Open-loop MSE (↓)", "mse_open"),
-        ("Prediction: time-to-divergence (↑)", "time_to_divergence_prediction"),
-        ("Angle concentration R (open) (↑)", "angle_error_R_open"),
-        ("Mean output corr (open) (↑)", "mean_corr_open"),
-        ("Replay ring-decode R² (↑)", "replay_r2_replay"),
-    ]
-
+    # wide tables: one row per condition_id, columns are metric names
     csw_mean = _cs_to_wide(condition_df, value_col="mean")
     csw_std = _cs_to_wide(condition_df, value_col="std")
     if csw_mean is None or csw_mean.empty:
-        print("[SKIP] fig_accuracy_panels: could not pivot condition_df")
+        print("[SKIP] fig2_symmetry_vs_performance: could not pivot condition_df")
         return
 
-    labels = csw_mean["condition_id"].astype(str).tolist()
-    x = np.arange(len(labels))
+    # Extract alpha from condition_id; drop rows without alpha
+    csw_mean["alpha"] = csw_mean["condition_id"].apply(_alpha_from_condition_id)
+    if csw_std is not None and "condition_id" in csw_std.columns:
+        csw_std["alpha"] = csw_std["condition_id"].apply(_alpha_from_condition_id)
 
-    # Keep only panels that actually exist in the table
-    panels = [(t, m) for (t, m) in panels if m in csw_mean.columns]
-    if not panels:
-        print("[SKIP] fig_accuracy_panels: none of the requested metrics are present")
-        return
+    csw_mean = csw_mean.dropna(subset=["alpha"]).copy()
+    csw_mean = csw_mean.sort_values("alpha")
+    if csw_std is not None:
+        csw_std = csw_std.dropna(subset=["alpha"]).copy()
+        csw_std = (
+            csw_std.set_index("condition_id")
+            .reindex(csw_mean["condition_id"])
+            .reset_index()
+        )
 
-    # Dynamic grid (rows x cols)
+    # Pick metrics (if absent, skip the panel gracefully)
+    panels = [
+        ("Open-loop MSE (↓) vs α", "mse_open"),
+        ("Best training loss (↓) vs α", "best_loss"),
+    ]
+
     import math
 
-    n = len(panels)
-    cols = 3
-    rows = int(math.ceil(n / float(cols)))
+    fig, axs = plt.subplots(1, 2, figsize=(10, 3.6))
+    axs = np.array(axs).reshape(-1)
 
-    fig, axs = plt.subplots(rows, cols, figsize=(4 * cols, 3.2 * rows))
-    axs = np.array(axs).reshape(-1)  # flatten
-
+    plotted_any = False
     for i, (title, metric) in enumerate(panels):
         ax = axs[i]
-        means = csw_mean.set_index("condition_id")[metric].reindex(labels).values
+        if metric not in csw_mean.columns:
+            ax.axis("off")
+            continue
+        x = csw_mean["alpha"].values
+        y = csw_mean[metric].values
         yerr = None
         if csw_std is not None and metric in csw_std.columns:
-            yerr = csw_std.set_index("condition_id")[metric].reindex(labels).values
+            yerr = (
+                csw_std.set_index("condition_id")[metric]
+                .reindex(csw_mean["condition_id"])
+                .values
+            )
 
-        ax.bar(
-            x, means, width=0.75, yerr=yerr, capsize=4, linewidth=0.8, edgecolor="black"
-        )
-        ax.set_xticks(x)
-        ax.set_xticklabels(
-            labels, rotation=30, ha="right", fontsize=max(8, int(fontsize * 0.85))
-        )
-        ax.set_title(title, fontsize=fontsize)
-        ax.grid(axis="y", linestyle=":", alpha=0.4)
+        # line with errorbars
+        if yerr is not None:
+            ax.errorbar(x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6)
+        else:
+            ax.plot(x, y, "-o", linewidth=1.6)
 
-        if (
-            metric == "mse_open"
-        ):  # lower is better → invert for visual “higher bar = better”
-            ax.set_ylim(bottom=0)
-            ax.invert_yaxis()
+        _style(ax, fontsize, title=title, xlabel="α (symmetry mix)", ylabel=metric)
+        # Optional: invert y if you prefer “higher = better” visualization. Here we keep natural scale.
 
-    # Hide any leftover empty axes
-    for j in range(i + 1, rows * cols):
-        axs[j].axis("off")
+        plotted_any = True
+
+    if not plotted_any:
+        print("[SKIP] fig2_symmetry_vs_performance: no target metrics present")
+        return
 
     fig.tight_layout()
     if savepath:
@@ -397,46 +473,201 @@ def fig_accuracy_panels(condition_df, savepath=None, fontsize=12):
 
 
 # -----------------------------------------------------------
-# Figure 3 – Mixing ratio vs performance (scatter per run)
+# Figure 3 – Emergent traveling-waves and replay dynamics
 # -----------------------------------------------------------
 
 
-def fig_mix_vs_perf(
-    run_level_df,
+def fig3_traveling_wave_and_polar(
+    condition_dir,
+    run_select="best_replay",  # "best_replay" or "best_mse"
     savepath=None,
     fontsize=12,
-    mix_col="mix_A_over_S_last",
-    perf_col="openloop_mse_last",
+    max_units=100,
 ):
     """
-    Scatter across runs: mixing ratio (A/S) vs performance.
-    You can change perf_col to e.g. 'replay_r2_last' or 'final_loss'.
+    Panel A: hidden heatmaps (replay & prediction), time x unit (units sorted by peak time).
+    Panel B: polar angle vs time (replay=pred only; prediction=pred + true).
+    Expects per-run trace files saved by evaluate.py:
+      *_replay_hidden.npy, *_prediction_hidden.npy,
+      *_replay_angles.csv,  *_prediction_angles.csv
     """
-    if run_level_df is None or mix_col not in run_level_df.columns:
-        print("[SKIP] fig_mix_vs_perf: missing run_level_df or mix column")
-        return
-    if perf_col not in run_level_df.columns:
-        print("[SKIP] fig_mix_vs_perf: perf column '%s' absent" % perf_col)
+    import pandas as pd
+
+    condition_dir = Path(str(condition_dir).strip()).expanduser()
+
+    # Try exact, then relative-with-leading-dot, then any *run_level*.csv
+    candidates = [
+        condition_dir / "run_level.csv",
+        Path("." + str(condition_dir))
+        / "run_level.csv",  # handles accidental leading '/'
+    ]
+    candidates += list(condition_dir.glob("*run_level*.csv"))
+
+    # Pick the first that exists
+    rpath = next((p for p in candidates if p.exists()), None)
+
+    print("[fig3] condition_dir:", condition_dir)
+    print("[fig3] run_level candidates:", [str(p) for p in candidates])
+    print("[fig3] chosen run_level.csv:", rpath)
+
+    if rpath is None:
+        try:
+            print("[fig3] ls:", os.listdir(str(condition_dir)))
+        except Exception as e:
+            print("[fig3] cannot list dir:", e)
+        print(f"[SKIP] fig3: no run_level.csv in {condition_dir}")
         return
 
-    df = run_level_df.dropna(subset=[mix_col, perf_col]).copy()
+    # anchor all paths to the *actual* CSV's parent dir (avoids /runs vs ./runs mismatch)
+    condition_dir = rpath.parent.resolve()
+
+    # Decide which run to visualize, based on run_level.csv
+    df = pd.read_csv(str(rpath))
     if df.empty:
-        print("[SKIP] fig_mix_vs_perf: no valid rows")
+        print(f"[SKIP] fig3: run_level.csv is empty in {condition_dir}")
         return
-    cond = df.get("condition_id", pd.Series(["?"] * len(df))).astype(str).values
 
-    fig, ax = plt.subplots(figsize=(5.5, 4.5))
-    for c in sorted(set(cond)):
-        sub = df[cond == c]
-        ax.scatter(sub[mix_col].values, sub[perf_col].values, s=18, label=c, alpha=0.8)
-    _style(
-        ax,
-        fontsize,
-        title="Mixing (A/S) vs Performance",
-        xlabel="A/S (last)",
-        ylabel=perf_col,
-        legend=True,
+    # Choose the “best” run for the requested criterion
+    if run_select == "best_replay" and "replay_r2" in df.columns:
+        pick = df.sort_values("replay_r2", ascending=False).head(1)
+    else:
+        key = (
+            "mse_open"
+            if "mse_open" in df.columns
+            else ("final_loss" if "final_loss" in df.columns else None)
+        )
+        if key is None:
+            print(
+                f"[SKIP] fig3: neither 'replay_r2' nor ('mse_open'/'final_loss') in run_level.csv"
+            )
+            return
+        pick = df.sort_values(key, ascending=(key != "replay_r2")).head(1)
+
+    if pick.empty or "run_id" not in pick.columns:
+        print(f"[SKIP] fig3: cannot identify run_id from run_level.csv")
+        return
+
+    run_id = int(pick.iloc[0]["run_id"])
+
+    # resolve stub paths inside run_XX
+    run_dir = condition_dir / f"run_{int(run_id):02d}"
+    # Find a stub from the checkpoint filename:
+    ckpts = list(run_dir.glob("*.pth.tar"))
+    if not ckpts:
+        print(f"[SKIP] fig3: no checkpoint in {run_dir}")
+        return
+
+    # strip the trailing ".pth.tar" to get the stub
+    ckpt_path = str(ckpts[0])
+    if ckpt_path.endswith(".pth.tar"):
+        stub = ckpt_path[:-8]  # drop the 8 chars ".pth.tar"
+    else:
+        # fallback: drop one suffix
+        stub = str(Path(ckpt_path).with_suffix(""))
+
+    # load traces (allow missing prediction files gracefully)
+    rp_h = (
+        np.load(stub + "_replay_hidden.npy")
+        if os.path.exists(stub + "_replay_hidden.npy")
+        else None
     )
+    pr_h = (
+        np.load(stub + "_prediction_hidden.npy")
+        if os.path.exists(stub + "_prediction_hidden.npy")
+        else None
+    )
+
+    def _read_angles_csv(path):
+        if not os.path.exists(path):
+            return None
+        import csv
+
+        rows = []
+        with open(path, "r") as f:
+            for i, r in enumerate(csv.reader(f)):
+                if i == 0:  # header
+                    header = r
+                    continue
+                rows.append(r)
+        arr = np.array(rows, dtype=float) if rows else None
+        return header, arr
+
+    rp_hdr, rp_ang = _read_angles_csv(stub + "_replay_angles.csv")
+    pr_hdr, pr_ang = _read_angles_csv(stub + "_prediction_angles.csv")
+
+    if rp_h is None and pr_h is None:
+        print(f"[SKIP] fig3: no hidden traces in {run_dir}")
+        return
+
+    # --- Panel A: heatmaps ---
+    fig = plt.figure(figsize=(12, 6))
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.2, 1.0], hspace=0.3, wspace=0.25)
+
+    # helper to plot one heatmap (first batch only)
+    def _heatmap(ax, H, title):
+        # H: [B,T,H] -> use B=0
+        X = H[0]  # [T,H]
+        # z-score per unit for visualization
+        Xm = X - X.mean(axis=0, keepdims=True)
+        Xs = X.std(axis=0, keepdims=True) + 1e-9
+        Z = Xm / Xs
+
+        # sort units by peak time to reveal wave
+        peak_t = np.argmax(Z, axis=0)
+        order = np.argsort(peak_t)
+        if Z.shape[1] > max_units:
+            order = order[:max_units]
+        Zs = Z[:, order].T  # [units, time] for nicer heatmap orientation
+
+        im = ax.imshow(Zs, aspect="auto", interpolation="nearest")
+        ax.set_title(title)
+        ax.set_xlabel("time")
+        ax.set_ylabel("units (sorted)")
+        return im
+
+    axA = fig.add_subplot(gs[0, 0])
+    if rp_h is not None:
+        _heatmap(axA, rp_h, "Replay: hidden (time × unit)")
+    else:
+        axA.axis("off")
+        axA.set_title("Replay: (no trace)")
+
+    axB = fig.add_subplot(gs[0, 1])
+    if pr_h is not None:
+        _heatmap(axB, pr_h, "Prediction: hidden (time × unit)")
+    else:
+        axB.axis("off")
+        axB.set_title("Prediction: (no trace)")
+
+    # --- Panel B: polar plots ---
+    axC = fig.add_subplot(gs[1, :], projection="polar")
+
+    def _plot_polar(ax, hdr, arr, label_pred, label_true=None):
+        if arr is None:
+            return
+        cols = {name: i for i, name in enumerate(hdr)}
+        t = arr[:, cols.get("t", 0)]
+        tp = arr[:, cols.get("theta_pred", 1)]
+        if "theta_true" in cols:
+            tt = arr[:, cols["theta_true"]]
+        else:
+            tt = None
+        ax.plot(tp, t, lw=1.5, label=label_pred)
+        if tt is not None:
+            ax.plot(tt, t, lw=1.0, linestyle="--", label=label_true)
+
+    _plot_polar(axC, rp_hdr, rp_ang, label_pred="Replay θ̂(t)")
+    _plot_polar(
+        axC, pr_hdr, pr_ang, label_pred="Prediction θ̂(t)", label_true="Prediction θ(t)"
+    )
+
+    axC.set_title("Polar: decoded angle vs time")
+    axC.legend(loc="upper right", bbox_to_anchor=(1.2, 1.0))
+    fig.suptitle(
+        f"Fig 3 — Traveling-wave & Polar (condition: {condition_dir.name}, run: {run_id})",
+        fontsize=fontsize + 2,
+    )
+
     if savepath:
         _savefig(fig, savepath)
     else:
@@ -711,27 +942,27 @@ def make_all_figures(
     cs = _filter_df(cs, condition_regex, run_regex)
     off = _filter_df(off, condition_regex, run_regex)
 
-    # 1) Convergence speed
-    fig_convergence_speed(
-        cs, savepath=os.path.join(figdir, "fig1_convergence.png"), fontsize=fontsize
+    # 1) Accuracy and convergence speed
+    fig1_training_dynamics(
+        cond_roots if cond_roots else [args.agg_dir],
+        os.path.join(args.figdir, "fig1_training_dynamics.png"),
+        fontsize=args.fontsize,
     )
 
-    # 2) Accuracy panels
-    fig_accuracy_panels(
-        cs, savepath=os.path.join(figdir, "fig2_accuracy_panels.png"), fontsize=fontsize
+    # 2) Mixing vs performance
+    fig2_symmetry_vs_performance(
+        cs,
+        savepath=os.path.join(args.figdir, "fig2_symmetry_vs_performance.png"),
+        fontsize=args.fontsize,
     )
 
-    # 3) Mixing vs performance (tweak perf_col if you prefer)
-    fig_mix_vs_perf(
-        rl,
-        savepath=os.path.join(figdir, "fig3_mix_vs_perf.png"),
-        fontsize=fontsize,
-        mix_col="mix_A_over_S_last",
-        perf_col=(
-            "openloop_mse_last"
-            if rl is not None and "openloop_mse_last" in rl.columns
-            else "final_loss"
-        ),
+    # 3) Emergent traveling-waves & polar plots
+    cond_for_fig3 = cond_roots[0] if cond_roots else args.agg_dir
+    fig3_traveling_wave_and_polar(
+        condition_dir=cond_for_fig3,
+        run_select="best_replay",
+        savepath=os.path.join(args.figdir, "fig3_traveling_and_polar.png"),
+        fontsize=args.fontsize,
     )
 
     # 4) Spectral radius vs performance
@@ -885,21 +1116,23 @@ def main(argv=None):
         return (not requested) or (str(k) in requested)
 
     if want(1):
-        fig_convergence_speed(
-            cs,
-            os.path.join(args.figdir, "fig1_convergence.png"),
+        fig1_training_dynamics(
+            cond_roots if cond_roots else [args.agg_dir],
+            os.path.join(args.figdir, "fig1_training_dynamics.png"),
             fontsize=args.fontsize,
         )
     if want(2):
-        fig_accuracy_panels(
+        fig2_symmetry_vs_performance(
             cs,
-            os.path.join(args.figdir, "fig2_accuracy_panels.png"),
+            savepath=os.path.join(args.figdir, "fig2_symmetry_vs_performance.png"),
             fontsize=args.fontsize,
         )
     if want(3):
-        fig_mix_vs_perf(
-            rl,
-            os.path.join(args.figdir, "fig3_mix_vs_perf.png"),
+        cond_for_fig3 = cond_roots[0] if cond_roots else args.agg_dir
+        fig3_traveling_wave_and_polar(
+            condition_dir=cond_for_fig3,
+            run_select="best_replay",
+            savepath=os.path.join(args.figdir, "fig3_traveling_and_polar.png"),
             fontsize=args.fontsize,
         )
     print("QUITTING AFTER FIG 3")

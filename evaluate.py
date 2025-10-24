@@ -44,6 +44,7 @@ import torch
 import torch.nn as nn
 from typing import List
 import re
+import numpy as np, pandas as pd, os
 
 
 from RNN_Class import ElmanRNN_pytorch_module_v2  # your model class
@@ -295,6 +296,68 @@ def _write_train_summary(ckpt_path: Path):
         w.writerow(row)
     print("[train_summary] wrote:", out_csv)
 
+    # ---- per-epoch series exports (for Fig 1) ----
+    run_dir = ckpt_path.parent
+    stub = ckpt_path.stem.replace(".pth", "")
+
+    # 1) Loss curve
+    loss = ckpt.get("loss", [])
+    if len(loss):
+        df = pd.DataFrame({"epoch": np.arange(len(loss), dtype=int), "loss": loss})
+        df.to_csv(run_dir / f"{stub}_loss_curve.csv", index=False)
+        print("[train_summary] wrote:", run_dir / f"{stub}_loss_curve.csv")
+
+    # 2) Gradient global L2/LMS pre/post per snapshot epoch (if available)
+    g_hist = ckpt.get("grad_metrics", {}).get("history", [])
+    if g_hist:
+        rows = []
+        for rec in g_hist:
+            e = int(rec["epoch"])
+            pre = rec["pre"]["global"]
+            post = rec["post"]["global"]
+            rows.append(
+                {
+                    "epoch": e,
+                    "grad_L2_pre": float(pre["L2"]),
+                    "grad_RMS_pre": float(pre["RMS"]),
+                    "grad_L2_post": float(post["L2"]),
+                    "grad_RMS_post": float(post["RMS"]),
+                }
+            )
+        pd.DataFrame(rows).sort_values("epoch").to_csv(
+            run_dir / f"{stub}_grad_curve.csv", index=False
+        )
+        print("[train_summary] wrote:", run_dir / f"{stub}_grad_curve.csv")
+
+    # 3) Weight structure trajectory + spectral radius per snapshot
+    w_hist = ckpt.get("weight_structure", {}).get("history", [])
+    W_snaps = ckpt.get("weights", {}).get("W_hh_history", None)  # [K, H, H] float16
+    rows = []
+    for i, rec in enumerate(w_hist):
+        e = int(rec.get("epoch", i))
+        row = {
+            "epoch": e,
+            "fro_W": rec.get("fro_W", np.nan),
+            "fro_S": rec.get("fro_S", np.nan),
+            "fro_A": rec.get("fro_A", np.nan),
+            "non_normality_commutator": rec.get("non_normality_commutator", np.nan),
+        }
+        # spectral radius from corresponding snapshot if available
+        sp = np.nan
+        if W_snaps is not None and i < len(W_snaps):
+            W = np.array(W_snaps[i], dtype=np.float32)
+            try:
+                sp = float(np.max(np.abs(np.linalg.eigvals(W))))
+            except Exception:
+                pass
+        row["spectral_radius"] = sp
+        rows.append(row)
+    if rows:
+        pd.DataFrame(rows).sort_values("epoch").to_csv(
+            run_dir / f"{stub}_wstruct_curve.csv", index=False
+        )
+        print("[train_summary] wrote:", run_dir / f"{stub}_wstruct_curve.csv")
+
 
 def _safe_float(x):
     try:
@@ -308,6 +371,15 @@ def _safe_int(x):
         return int(x)
     except Exception:
         return None
+
+
+def _ckpt_stub(ckpt_path):
+    """Return filename minus compound checkpoint suffixes ('.pth.tar', '.pt', '.ckpt')."""
+    name = Path(ckpt_path).name
+    for suf in (".pth.tar", ".pt", ".ckpt"):
+        if name.endswith(suf):
+            return name[: -len(suf)]
+    return Path(ckpt_path).stem  # fallback
 
 
 # ------------------------- Angle / residual utils -------------------------
@@ -438,6 +510,63 @@ def _phase_drift_per_step(output, Target):
     return float(b)
 
 
+def _forward_sequence(state_dict, X_in, args, device, return_hidden=False):
+    """
+    Runs the saved model on X_in.
+    Returns:
+      Y_out if return_hidden=False
+      (Y_out, h_seq) if return_hidden=True
+    """
+    # Rebuild the model the same way as in training
+    N = args["n"]
+    HN = args["hidden_n"]
+    net = ElmanRNN_pytorch_module_v2(N, HN, N)
+    net.load_state_dict(state_dict)
+    net.to(device)
+    net.eval()
+
+    with torch.no_grad():
+        # h0 as zeros: [1, B, H]
+        h0 = torch.zeros(1, X_in.shape[0], HN, device=device)
+        # Forward returns (output, h_seq) in your RNN_Class
+        Y_out, h_seq = net(X_in.to(device), h0)
+    return (Y_out, h_seq) if return_hidden else Y_out
+
+
+def _decode_angles_from_outputs(Y):  # Y: [B,T,N] probs or raw
+    B, T, N = Y.shape
+    # Normalize to prob-simplex for angle decoding
+    pred = Y.clamp_min(0)
+    pred = pred / (pred.sum(dim=2, keepdim=True) + 1e-12)
+    idx = torch.arange(N, device=Y.device)
+    theta = 2 * math.pi * idx / N
+    cos_th, sin_th = torch.cos(theta), torch.sin(theta)
+    C = (pred * cos_th).sum(dim=2)
+    S = (pred * sin_th).sum(dim=2)
+    theta_pred = torch.atan2(S, C)  # [B,T]
+    return theta_pred
+
+
+def _targets_to_angles_simple(Target):
+    # identical to your existing _targets_to_angles; keep a thin wrapper if needed
+    return _targets_to_angles(Target)
+
+
+def _write_angles_csv(path, t, theta_pred, theta_true=None):
+    import csv
+
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        if theta_true is None:
+            w.writerow(["t", "theta_pred"])
+            for i in range(len(t)):
+                w.writerow([int(t[i]), float(theta_pred[i])])
+        else:
+            w.writerow(["t", "theta_true", "theta_pred"])
+            for i in range(len(t)):
+                w.writerow([int(t[i]), float(theta_true[i]), float(theta_pred[i])])
+
+
 # ------------------------- Basic summaries -------------------------
 
 
@@ -565,15 +694,34 @@ def evaluate_open(ckpt_path, device="cpu", data_path=None):
     return out
 
 
-def evaluate_replay(ckpt_path, device="cpu", noise_scale=0.01):
-    """Replay: drive the trained model with Gaussian noise (same shape as X)."""
+def evaluate_replay(ckpt_path, device="cpu", noise_scale=0.01, save_traces=True):
     ckpt = _load_ckpt(ckpt_path, map_location=device)
     args = ckpt["args"]
     X = ckpt["X_mini"].clone()
     Y_true = ckpt["Target_mini"].clone()
 
     X_noise = torch.normal(mean=0.0, std=noise_scale, size=X.shape)
-    Y_out = _forward_sequence(ckpt["state_dict"], X_noise, args, device)
+    Y_out, h_seq = _forward_sequence(
+        ckpt["state_dict"], X_noise, args, device, return_hidden=True
+    )
+
+    # --- write replay traces (first batch row) ---
+    if save_traces:
+        stub = _ckpt_stub(ckpt_path)
+        run_dir = Path(ckpt_path).parent
+
+        out_hidden = run_dir / f"{stub}_replay_hidden.npy"
+        np.save(str(out_hidden), h_seq.detach().cpu().numpy())
+
+        theta_pred = _decode_angles_from_outputs(Y_out)[0].detach().cpu().numpy()
+        t = np.arange(theta_pred.shape[0])
+
+        # Replay has no ground-truth angles (noise drive), so we store predicted angle only.
+        out_angles = run_dir / f"{stub}_replay_angles.csv"
+        _write_angles_csv(str(out_angles), t, theta_pred)
+
+        print(f"[save] {out_hidden}")
+        print(f"[save] {out_angles}")
 
     out = {
         "mode": "replay",
@@ -590,19 +738,9 @@ def evaluate_replay(ckpt_path, device="cpu", noise_scale=0.01):
     }
     out.update(_angle_error_concentration(Y_out, Y_true))
     out.update(_residual_stats(Y_out, Y_true))
-    out.update(_ring_decode_r2_from_outputs(Y_out, Y_true))
-    # --- replay_r2 (cos/sin variance explained on ring) ---
-    # Normalize outputs to probabilities (per time step)
-    pred = Y_out.detach().clamp_min(0)
-    pred = pred / (pred.sum(dim=2, keepdim=True) + 1e-12)
-
-    # Targets are already distributions
-    Ct, St = _cossin_from_dist(Y_true)  # [B,T], [B,T]
-    Cp, Sp = _cossin_from_dist(pred)  # [B,T], [B,T]
-
-    Y_true_cs = torch.stack([Ct, St], dim=2)  # [B,T,2]
-    Y_pred_cs = torch.stack([Cp, Sp], dim=2)  # [B,T,2]
-    out["replay_r2"] = _r2_twohead(Y_true_cs, Y_pred_cs)
+    out.update(
+        _ring_decode_r2_from_outputs(Y_out, Y_true)
+    )  # gives 'ring_decode_R2' (your replay R²)
     out["time_to_divergence"] = ""
     out["phase_drift_per_step"] = ""
     out["mse_free"] = out["mean_corr_free"] = ""
@@ -613,38 +751,53 @@ def evaluate_replay(ckpt_path, device="cpu", noise_scale=0.01):
 
 
 def evaluate_prediction(
-    ckpt_path,
-    device="cpu",
-    noise_scale=0.01,
-    prefix_T=10,
-    div_thresh_deg=30.0,
-    div_consec=10,
+    ckpt_path, device="cpu", noise_scale=0.01, prefix_T=10, save_traces=True
 ):
-    """
-    Prediction (hybrid): teacher-forced prefix spliced into noisy input (still open-loop).
-    Good for short-horizon robustness (not feedback yet).
-    """
     ckpt = _load_ckpt(ckpt_path, map_location=device)
     args = ckpt["args"]
-    X = ckpt["X_mini"].clone()
+    X_in = ckpt["X_mini"].clone()
     Y_true = ckpt["Target_mini"].clone()
-    T = X.shape[1]
+
+    T = X_in.shape[1]
     prefix_T = max(0, min(prefix_T, T))
 
-    X_pred = torch.normal(mean=0.0, std=noise_scale, size=X.shape)
+    # build pred input: real prefix + noise tail
+    X_noise = torch.normal(mean=0.0, std=noise_scale, size=X_in.shape)
+    X_pred = X_noise.clone()
     if prefix_T > 0:
-        X_pred[:, :prefix_T, :] = X[:, :prefix_T, :]
+        X_pred[:, :prefix_T, :] = X_in[:, :prefix_T, :]
 
-    Y_out = _forward_sequence(ckpt["state_dict"], X_pred, args, device)
+    Y_out, h_seq = _forward_sequence(
+        ckpt["state_dict"], X_pred, args, device, return_hidden=True
+    )
 
+    # --- write prediction traces (first batch row) ---
+    if save_traces:
+        stub = _ckpt_stub(ckpt_path)  # <-- uses the helper
+        run_dir = Path(ckpt_path).parent  # save next to the ckpt
+
+        out_hidden = run_dir / f"{stub}_prediction_hidden.npy"
+        np.save(str(out_hidden), h_seq.detach().cpu().numpy())
+
+        theta_pred = _decode_angles_from_outputs(Y_out)[0].detach().cpu().numpy()
+        theta_true = _targets_to_angles_simple(Y_true)[0].detach().cpu().numpy()
+        t = np.arange(theta_pred.shape[0])
+
+        out_angles = run_dir / f"{stub}_prediction_angles.csv"
+        _write_angles_csv(str(out_angles), t, theta_pred, theta_true)
+
+        print(f"[save] {out_hidden}")
+        print(f"[save] {out_angles}")
+
+    # ... keep your existing metrics (mse, drift slope, etc.)
     out = {
         "mode": "prediction",
         "ckpt": str(ckpt_path),
         "data": "",
         "noise_scale": float(noise_scale),
         "prefix_T": int(prefix_T),
-        "div_thresh_deg": float(div_thresh_deg),
-        "div_consec": int(div_consec),
+        "div_thresh_deg": "",
+        "div_consec": "",
         "feedback_norm": "",
         "free_steps": "",
         "mse": _metric_mse(Y_true, Y_out),
@@ -653,17 +806,13 @@ def evaluate_prediction(
     out.update(_angle_error_concentration(Y_out, Y_true))
     out.update(_residual_stats(Y_out, Y_true))
     out.update(_ring_decode_r2_from_outputs(Y_out, Y_true))
-
-    thresh_rad = math.radians(div_thresh_deg)
-    out["time_to_divergence"] = _time_to_divergence(
-        Y_out, Y_true, thresh_rad, div_consec
-    )
-    out["phase_drift_per_step"] = _phase_drift_per_step(Y_out, Y_true)
+    # ensure you compute/keep 'phase_drift_per_step' somewhere in prediction path
+    out["time_to_divergence"] = ""
+    # out["phase_drift_per_step"] = <your existing computation>
     out["mse_free"] = out["mean_corr_free"] = ""
     out["angle_error_R_free"] = out["angle_error_circ_var_free"] = ""
     out["residual_lag1_autocorr_free"] = out["residual_L2_mean_free"] = ""
     out["ring_decode_R2_free"] = ""
-    out["replay_r2"] = ""
     return out
 
 
@@ -911,8 +1060,6 @@ def _evaluate_one_ckpt(ckpt: Path, args, csv_path: Path):
             device=args.device,
             noise_scale=args.noise_scale,
             prefix_T=args.prefix_T,
-            div_thresh_deg=args.div_thresh_deg,
-            div_consec=args.div_consec,
         )
         _write_csv(r, csv_path)
         print(f"[Prediction] {ckpt} -> {csv_path}")

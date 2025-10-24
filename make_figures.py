@@ -226,6 +226,35 @@ def _alpha_from_condition_id(cid):
     return major + minor / 100.0
 
 
+def _short_label_from_root(root: str) -> str:
+    # last path component only
+    return os.path.normpath(str(root)).split(os.sep)[-1]
+
+
+def _fit_slope(x, y, logx=False, logy=False):
+    """
+    Return slope m of a best-fit line after transforming axes
+    according to logx/logy (base-10). We fit y_t = m*x_t + b where
+    x_t = log10(x) if logx else x, and y_t = log10(y) if logy else y.
+    """
+    import numpy as np
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    if logx:
+        mask &= x > 0
+    if logy:
+        mask &= y > 0
+    x, y = x[mask], y[mask]
+    if x.size < 2:
+        return float("nan")
+    xt = np.log10(x) if logx else x
+    yt = np.log10(y) if logy else y
+    m, b = np.polyfit(xt, yt, 1)
+    return float(m)
+
+
 # ---------------------------
 # Matplotlib style utilities
 # ---------------------------
@@ -300,7 +329,15 @@ def _mean_sem_align(dfs, col):
     return aligned.index.values, mean, sem
 
 
-def fig1_training_dynamics(condition_roots, savepath=None, fontsize=12):
+def fig1_training_dynamics(
+    condition_roots,
+    savepath=None,
+    fontsize=12,
+    logxA=False,
+    logyA=False,
+    logxB=False,
+    logyB=False,
+):
     """
     Fig 1 (2x2):
       A: loss vs epoch
@@ -323,19 +360,30 @@ def fig1_training_dynamics(condition_roots, savepath=None, fontsize=12):
         x, m, s = _mean_sem_align(runs, "loss")
         if x is None:
             continue
-        axA.plot(x, m, lw=2, label=cond)
-        axA.fill_between(x, m - s, m + s, alpha=0.2)
+        x_plot = (x + 1) if logxA else x
+        # slope on the transformed axes requested by flags
+        m_slope = _fit_slope(x_plot, m, logx=logxA, logy=logyA)
+        label = f"{_short_label_from_root(cond)} (m={m_slope:.3g})"
+        axA.plot(x_plot, m, lw=2, label=label)
+        axA.fill_between(x_plot, m - s, m + s, alpha=0.2)
     _style(
         axA, fontsize, title="Loss vs epoch", xlabel="epoch", ylabel="loss", legend=True
     )
+    if logxA:
+        axA.set_xscale("log")
+    if logyA:
+        axA.set_yscale("log")
 
     # Panel B: grad L2 (post)
     for cond, runs in G.items():
         x, m, s = _mean_sem_align(runs, "grad_L2_post")
         if x is None:
             continue
-        axB.plot(x, m, lw=2, label=cond)
-        axB.fill_between(x, m - s, m + s, alpha=0.2)
+        x_plot = (x + 1) if logxB else x
+        m_slope = _fit_slope(x_plot, m, logx=logxB, logy=logyB)
+        label = f"{_short_label_from_root(cond)} (m={m_slope:.3g})"
+        axB.plot(x_plot, m, lw=2, label=label)
+        axB.fill_between(x_plot, m - s, m + s, alpha=0.2)
     _style(
         axB,
         fontsize,
@@ -344,6 +392,10 @@ def fig1_training_dynamics(condition_roots, savepath=None, fontsize=12):
         ylabel="‖∇‖₂",
         legend=True,
     )
+    if logxB:
+        axB.set_xscale("log")
+    if logyB:
+        axB.set_yscale("log")
 
     # Panel C: spectral radius
     for cond, runs in W.items():
@@ -507,8 +559,8 @@ def fig3_traveling_wave_and_polar(
     rpath = next((p for p in candidates if p.exists()), None)
 
     print("[fig3] condition_dir:", condition_dir)
-    print("[fig3] run_level candidates:", [str(p) for p in candidates])
-    print("[fig3] chosen run_level.csv:", rpath)
+    # print("[fig3] run_level candidates:", [str(p) for p in candidates])
+    # print("[fig3] chosen run_level.csv:", rpath)
 
     if rpath is None:
         try:
@@ -674,366 +726,6 @@ def fig3_traveling_wave_and_polar(
         plt.show()
 
 
-# ------------------------------------------------
-# Figure 4 – Spectral radius vs performance scatter
-# ------------------------------------------------
-
-
-def fig_sprad_vs_perf(
-    run_level_df,
-    savepath=None,
-    fontsize=12,
-    sprad_col="spectral_radius_last",
-    perf_col="openloop_mse_last",
-):
-    if run_level_df is None or sprad_col not in run_level_df.columns:
-        print(
-            "[SKIP] fig_sprad_vs_perf: missing run_level_df or spectral radius column"
-        )
-        return
-    if perf_col not in run_level_df.columns:
-        print("[SKIP] fig_sprad_vs_perf: perf column '%s' absent" % perf_col)
-        return
-
-    df = run_level_df.dropna(subset=[sprad_col, perf_col]).copy()
-    if df.empty:
-        print("[SKIP] fig_sprad_vs_perf: no valid rows")
-        return
-    cond = df.get("condition_id", pd.Series(["?"] * len(df))).astype(str).values
-
-    fig, ax = plt.subplots(figsize=(5.5, 4.5))
-    for c in sorted(set(cond)):
-        sub = df[cond == c]
-        ax.scatter(
-            sub[sprad_col].values, sub[perf_col].values, s=18, label=c, alpha=0.8
-        )
-    _style(
-        ax,
-        fontsize,
-        title="Spectral radius vs Performance",
-        xlabel="spectral radius (last)",
-        ylabel=perf_col,
-        legend=True,
-    )
-    if savepath:
-        _savefig(fig, savepath)
-    else:
-        plt.show()
-
-
-# -----------------------------------------------------------
-# Figure 5 – Weight drift & symmetry (phase-plane per run)
-# -----------------------------------------------------------
-
-
-def fig_phase_plane_sym_asym(
-    run_level_df,
-    savepath=None,
-    fontsize=12,
-    sym_col="fro_S_last",
-    asym_col="fro_A_last",
-    color_by="final_loss",
-):
-    """
-    Phase-plane: ||S||_F vs ||A||_F at last snapshot; color by a performance metric.
-    """
-    if run_level_df is None or not _has_cols(run_level_df, [sym_col, asym_col]):
-        print("[SKIP] fig_phase_plane_sym_asym: missing S/A columns")
-        return
-
-    df = run_level_df.dropna(subset=[sym_col, asym_col]).copy()
-    if df.empty:
-        print("[SKIP] fig_phase_plane_sym_asym: no valid rows")
-        return
-
-    cvals = _col(df, color_by)
-    fig, ax = plt.subplots(figsize=(5.5, 4.5))
-    sc = ax.scatter(
-        df[sym_col].values,
-        df[asym_col].values,
-        s=18,
-        c=cvals.values if cvals is not None else None,
-        alpha=0.85,
-    )
-    if cvals is not None:
-        cb = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
-        cb.ax.tick_params(labelsize=fontsize - 1)
-        cb.set_label(color_by, fontsize=fontsize)
-    _style(
-        ax,
-        fontsize,
-        title="Sym vs Asym (Frobenius)",
-        xlabel="||S||_F (last)",
-        ylabel="||A||_F (last)",
-    )
-    if savepath:
-        _savefig(fig, savepath)
-    else:
-        plt.show()
-
-
-# -----------------------------------------------------------
-# Figure 6 – Gradient × Mixing overlay (per run)
-# -----------------------------------------------------------
-
-
-def fig_grad_mix_overlay(
-    run_level_df,
-    savepath=None,
-    fontsize=12,
-    grad_col="grad_global_L2_post_last",
-    mix_col="mix_A_over_S_last",
-):
-    if run_level_df is None or not _has_cols(run_level_df, [grad_col, mix_col]):
-        print("[SKIP] fig_grad_mix_overlay: missing columns")
-        return
-    df = run_level_df.dropna(subset=[grad_col, mix_col]).copy()
-    if df.empty:
-        print("[SKIP] fig_grad_mix_overlay: no valid rows")
-        return
-
-    fig, ax = plt.subplots(figsize=(5.5, 4.5))
-    cond = df.get("condition_id", pd.Series(["?"] * len(df))).astype(str).values
-    for c in sorted(set(cond)):
-        sub = df[cond == c]
-        ax.scatter(sub[mix_col].values, sub[grad_col].values, s=18, alpha=0.8, label=c)
-    _style(
-        ax,
-        fontsize,
-        title="Gradient × Mixing",
-        xlabel="A/S (last)",
-        ylabel="global grad L2 (post)",
-        legend=True,
-    )
-    if savepath:
-        _savefig(fig, savepath)
-    else:
-        plt.show()
-
-
-# -----------------------------------------------------------
-# Figure 7 – Spectral portrait (if offline NPZ or CSV exists)
-# -----------------------------------------------------------
-
-
-def fig_eigs_lines_offline(
-    offline_df, savepath=None, fontsize=12, group_by="condition_id", max_curves=12
-):
-    """
-    Plot eigenvalue magnitude curves (if stored as columns like eig_0,... or via CSV rows).
-    This is a best-effort panel: if offline_df has 'spectral_radius' only, we skip.
-    Expected schemas vary; we try a few reasonable patterns:
-      - Wide: columns 'eig_0', 'eig_1', ... OR 'sv_0', 'sv_1', ...
-      - Long:  columns 'eigval', 'rank', 'snapshot' per run_id
-    """
-    if offline_df is None:
-        print("[SKIP] fig_eigs_lines_offline: no offline_df")
-        return
-
-    # Wide format first
-    eig_cols = [c for c in offline_df.columns if c.startswith("eig_")]
-    sv_cols = [c for c in offline_df.columns if c.startswith("sv_")]
-    df = None
-    ylabel = ""
-
-    if eig_cols:
-        df = offline_df[
-            eig_cols
-            + ["run_id"]
-            + ([group_by] if group_by in offline_df.columns else [])
-        ].copy()
-        ylabel = "eigenvalue magnitude (sorted)"
-        # sort columns by index
-        eig_cols = sorted(eig_cols, key=lambda s: int(s.split("_")[1]))
-        curves = df[eig_cols].values
-        labels = df.get(group_by, pd.Series(["?"] * len(df))).astype(str).values
-    elif sv_cols:
-        df = offline_df[
-            sv_cols
-            + ["run_id"]
-            + ([group_by] if group_by in offline_df.columns else [])
-        ].copy()
-        ylabel = "singular value (sorted)"
-        sv_cols = sorted(sv_cols, key=lambda s: int(s.split("_")[1]))
-        curves = df[sv_cols].values
-        labels = df.get(group_by, pd.Series(["?"] * len(df))).astype(str).values
-    else:
-        # Long format attempt (need columns: 'rank' & 'eigval' or 'sv')
-        need1 = set(["rank", "eigval"])
-        need2 = set(["rank", "sv"])
-        if set(offline_df.columns).issuperset(need1):
-            ylabel = "eigenvalue magnitude"
-            # pick up to max_curves runs to plot
-            curves = []
-            labels = []
-            for rid, g in offline_df.groupby("run_id"):
-                g2 = g.sort_values("rank")
-                curves.append(g2["eigval"].values)
-                labels.append(
-                    str(g2[group_by].iloc[0]) if group_by in g2.columns else str(rid)
-                )
-                if len(curves) >= max_curves:
-                    break
-        elif set(offline_df.columns).issuperset(need2):
-            ylabel = "singular value"
-            curves = []
-            labels = []
-            for rid, g in offline_df.groupby("run_id"):
-                g2 = g.sort_values("rank")
-                curves.append(g2["sv"].values)
-                labels.append(
-                    str(g2[group_by].iloc[0]) if group_by in g2.columns else str(rid)
-                )
-                if len(curves) >= max_curves:
-                    break
-        else:
-            print("[SKIP] fig_eigs_lines_offline: no recognizable eig/sv columns")
-            return
-
-    if curves is None or len(curves) == 0:
-        print("[SKIP] fig_eigs_lines_offline: empty curves")
-        return
-
-    fig, ax = plt.subplots(figsize=(6.5, 4.5))
-    kmax = max(len(c) for c in curves)
-    x = np.arange(kmax)
-    # plot up to max_curves with light alpha
-    for i, y in enumerate(curves[:max_curves]):
-        ax.plot(
-            x[: len(y)],
-            y,
-            linewidth=1.3,
-            alpha=0.7,
-            label=labels[i] if i < 10 else None,
-        )
-    if len(curves) > 1:
-        _style(
-            ax,
-            fontsize,
-            title="Spectral lines (subset)",
-            xlabel="rank",
-            ylabel=ylabel,
-            legend=True,
-        )
-    else:
-        _style(ax, fontsize, title="Spectral line", xlabel="rank", ylabel=ylabel)
-    if savepath:
-        _savefig(fig, savepath)
-    else:
-        plt.show()
-
-
-# ------------------------------------------
-# Orchestrator: make all default main figs
-# ------------------------------------------
-
-
-def make_all_figures(
-    agg_dir="./runs_agg",
-    figdir="./figs",
-    condition_regex=None,
-    run_regex=None,
-    fontsize=12,
-):
-    _ensure_dir(figdir)
-    rl, cs, off, ev = load_all(agg_dir=agg_dir)
-
-    rl = _filter_df(rl, condition_regex, run_regex)
-    cs = _filter_df(cs, condition_regex, run_regex)
-    off = _filter_df(off, condition_regex, run_regex)
-
-    # 1) Accuracy and convergence speed
-    fig1_training_dynamics(
-        cond_roots if cond_roots else [args.agg_dir],
-        os.path.join(args.figdir, "fig1_training_dynamics.png"),
-        fontsize=args.fontsize,
-    )
-
-    # 2) Mixing vs performance
-    fig2_symmetry_vs_performance(
-        cs,
-        savepath=os.path.join(args.figdir, "fig2_symmetry_vs_performance.png"),
-        fontsize=args.fontsize,
-    )
-
-    # 3) Emergent traveling-waves & polar plots
-    cond_for_fig3 = cond_roots[0] if cond_roots else args.agg_dir
-    fig3_traveling_wave_and_polar(
-        condition_dir=cond_for_fig3,
-        run_select="best_replay",
-        savepath=os.path.join(args.figdir, "fig3_traveling_and_polar.png"),
-        fontsize=args.fontsize,
-    )
-
-    # 4) Spectral radius vs performance
-    fig_sprad_vs_perf(
-        rl,
-        savepath=os.path.join(figdir, "fig4_sprad_vs_perf.png"),
-        fontsize=fontsize,
-        sprad_col=(
-            "spectral_radius_last"
-            if rl is not None and "spectral_radius_last" in rl.columns
-            else "fro_W_last"
-        ),
-        perf_col=(
-            "openloop_mse_last"
-            if rl is not None and "openloop_mse_last" in rl.columns
-            else "final_loss"
-        ),
-    )
-
-    # 5) Phase-plane S vs A
-    fig_phase_plane_sym_asym(
-        rl,
-        savepath=os.path.join(figdir, "fig5_sym_vs_asym.png"),
-        fontsize=fontsize,
-        sym_col=(
-            "fro_S_last"
-            if rl is not None and "fro_S_last" in (rl.columns if rl is not None else [])
-            else "fro_W_last"
-        ),
-        asym_col=(
-            "fro_A_last"
-            if rl is not None and "fro_A_last" in (rl.columns if rl is not None else [])
-            else "fro_W_last"
-        ),
-        color_by=(
-            "final_loss"
-            if rl is not None and "final_loss" in rl.columns
-            else "openloop_mse_last"
-        ),
-    )
-
-    # 6) Gradient × Mixing
-    fig_grad_mix_overlay(
-        rl,
-        savepath=os.path.join(figdir, "fig6_grad_times_mix.png"),
-        fontsize=fontsize,
-        grad_col=(
-            "grad_global_L2_post_last"
-            if rl is not None and "grad_global_L2_post_last" in rl.columns
-            else "grad_global_RMS_post_last"
-        ),
-        mix_col=(
-            "mix_A_over_S_last"
-            if rl is not None and "mix_A_over_S_last" in rl.columns
-            else "sym_ratio_last"
-        ),
-    )
-
-    # 7) Spectral lines (subset)
-    fig_eigs_lines_offline(
-        off,
-        savepath=os.path.join(figdir, "fig7_spectral_lines.png"),
-        fontsize=fontsize,
-        group_by=(
-            "condition_id"
-            if off is not None and "condition_id" in off.columns
-            else "run_id"
-        ),
-    )
-
-
 # ---------------------------
 # CLI
 # ---------------------------
@@ -1081,6 +773,17 @@ def parse_args(argv=None):
         default="",
         help="Glob that expands to multiple condition roots (e.g. './runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/*')",
     )
+    p.add_argument("--fig1_logxA", action="store_true", help="Fig1A: log x-axis")
+    p.add_argument("--fig1_logyA", action="store_true", help="Fig1A: log y-axis")
+    p.add_argument("--fig1_logxB", action="store_true", help="Fig1B: log x-axis")
+    p.add_argument("--fig1_logyB", action="store_true", help="Fig1B: log y-axis")
+    p.add_argument(
+        "--figtag",
+        type=str,
+        default="",
+        help="Append this tag to output figure filenames",
+    )
+
     return p.parse_args(argv)
 
 
@@ -1115,11 +818,17 @@ def main(argv=None):
     def want(k):
         return (not requested) or (str(k) in requested)
 
+    suffix = f"_{args.figtag}" if args.figtag else ""
+    fig1_path = os.path.join(args.figdir, f"fig1_training_dynamics{suffix}.png")
     if want(1):
         fig1_training_dynamics(
             cond_roots if cond_roots else [args.agg_dir],
-            os.path.join(args.figdir, "fig1_training_dynamics.png"),
+            fig1_path,
             fontsize=args.fontsize,
+            logxA=args.fig1_logxA,
+            logyA=args.fig1_logyA,
+            logxB=args.fig1_logxB,
+            logyB=args.fig1_logyB,
         )
     if want(2):
         fig2_symmetry_vs_performance(
@@ -1133,32 +842,6 @@ def main(argv=None):
             condition_dir=cond_for_fig3,
             run_select="best_replay",
             savepath=os.path.join(args.figdir, "fig3_traveling_and_polar.png"),
-            fontsize=args.fontsize,
-        )
-    print("QUITTING AFTER FIG 3")
-    quit()
-    if want(4):
-        fig_sprad_vs_perf(
-            rl,
-            os.path.join(args.figdir, "fig4_sprad_vs_perf.png"),
-            fontsize=args.fontsize,
-        )
-    if want(5):
-        fig_phase_plane_sym_asym(
-            rl,
-            os.path.join(args.figdir, "fig5_sym_vs_asym.png"),
-            fontsize=args.fontsize,
-        )
-    if want(6):
-        fig_grad_mix_overlay(
-            rl,
-            os.path.join(args.figdir, "fig6_grad_times_mix.png"),
-            fontsize=args.fontsize,
-        )
-    if want(7):
-        fig_eigs_lines_offline(
-            off,
-            os.path.join(args.figdir, "fig7_spectral_lines.png"),
             fontsize=args.fontsize,
         )
 

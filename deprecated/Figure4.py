@@ -1,8 +1,8 @@
 import numpy
 import torch
-from helper import *
+from deprecated.helper import *
 from RNN_Class import *
-from IO_plot import *
+from deprecated.IO_plot import *
 import matplotlib
 
 matplotlib.use("Agg")

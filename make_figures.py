@@ -443,77 +443,102 @@ def fig1_training_dynamics(
 
 def fig2_symmetry_vs_performance(condition_df, savepath=None, fontsize=12):
     """
-    Figure 2: Symmetry–performance relations (two panels, curves vs alpha, ±std).
-      Panel A: mse_open (↓) vs alpha
-      Panel B: best_loss (↓) vs alpha
-    Expects tall condition_summary.csv with columns: ['condition_id','metric','mean','std'].
+    Figure 2: Symmetry–performance relations (two panels, curves vs alpha, ±std)
+      Panel A: mse_open (↓) vs α
+      Panel B: best_loss (↓) vs α
+    Supports multiple condition families (e.g., shiftmh, shiftcycmh)
     """
-    req = {"condition_id", "metric", "mean"}
-    if condition_df is None or not req.issubset(condition_df.columns):
+
+    # --- Identify family shortnames from condition_id strings ---
+    if condition_df is None or not {"condition_id", "metric", "mean"}.issubset(
+        condition_df.columns
+    ):
         print("[SKIP] fig2_symmetry_vs_performance: condition_summary missing columns")
         return
 
-    # wide tables: one row per condition_id, columns are metric names
-    csw_mean = _cs_to_wide(condition_df, value_col="mean")
-    csw_std = _cs_to_wide(condition_df, value_col="std")
-    if csw_mean is None or csw_mean.empty:
-        print("[SKIP] fig2_symmetry_vs_performance: could not pivot condition_df")
-        return
+    # Extract shortname (basename before first underscore)
+    condition_df = condition_df.copy()
+    condition_df["shortname"] = condition_df["condition_id"].apply(
+        lambda cid: os.path.basename(str(cid)).split("_")[0]
+    )
 
-    # Extract alpha from condition_id; drop rows without alpha
-    csw_mean["alpha"] = csw_mean["condition_id"].apply(_alpha_from_condition_id)
-    if csw_std is not None and "condition_id" in csw_std.columns:
-        csw_std["alpha"] = csw_std["condition_id"].apply(_alpha_from_condition_id)
+    # List of distinct families (e.g. ['shiftmh', 'shiftcycmh'])
+    families = sorted(condition_df["shortname"].unique().tolist())
 
-    csw_mean = csw_mean.dropna(subset=["alpha"]).copy()
-    csw_mean = csw_mean.sort_values("alpha")
-    if csw_std is not None:
-        csw_std = csw_std.dropna(subset=["alpha"]).copy()
-        csw_std = (
-            csw_std.set_index("condition_id")
-            .reindex(csw_mean["condition_id"])
-            .reset_index()
-        )
+    # If only one family, we’ll use it in the title later
+    single_family = families[0] if len(families) == 1 else None
 
-    # Pick metrics (if absent, skip the panel gracefully)
+    # --- Set up figure panels ---
     panels = [
         ("Open-loop MSE (↓) vs α", "mse_open"),
         ("Best training loss (↓) vs α", "best_loss"),
     ]
-
     fig, axs = plt.subplots(1, 2, figsize=(10, 3.6))
     axs = np.array(axs).reshape(-1)
 
     plotted_any = False
-    for i, (title, metric) in enumerate(panels):
-        ax = axs[i]
-        if metric not in csw_mean.columns:
-            ax.axis("off")
+
+    # --- Plot each family separately ---
+    for fam in families:
+        sub = condition_df[condition_df["shortname"] == fam]
+        csw_mean = _cs_to_wide(sub, value_col="mean")
+        csw_std = _cs_to_wide(sub, value_col="std")
+        if csw_mean is None or csw_mean.empty:
             continue
-        x = csw_mean["alpha"].values
-        y = csw_mean[metric].values
-        yerr = None
-        if csw_std is not None and metric in csw_std.columns:
-            yerr = (
-                csw_std.set_index("condition_id")[metric]
+
+        # α values
+        csw_mean["alpha"] = csw_mean["condition_id"].apply(_alpha_from_condition_id)
+        csw_mean = csw_mean.dropna(subset=["alpha"]).sort_values("alpha")
+        if csw_std is not None and "condition_id" in csw_std.columns:
+            csw_std["alpha"] = csw_std["condition_id"].apply(_alpha_from_condition_id)
+            csw_std = (
+                csw_std.set_index("condition_id")
                 .reindex(csw_mean["condition_id"])
-                .values
+                .reset_index()
             )
 
-        # line with errorbars
-        if yerr is not None:
-            ax.errorbar(x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6)
-        else:
-            ax.plot(x, y, "-o", linewidth=1.6)
+        # Plot on both panels
+        for i, (title, metric) in enumerate(panels):
+            ax = axs[i]
+            if metric not in csw_mean.columns:
+                ax.axis("off")
+                continue
 
-        _style(ax, fontsize, title=title, xlabel="α (symmetry mix)", ylabel=metric)
-        # Optional: invert y if you prefer “higher = better” visualization. Here we keep natural scale.
+            x = csw_mean["alpha"].values
+            y = csw_mean[metric].values
+            yerr = None
+            if csw_std is not None and metric in csw_std.columns:
+                yerr = (
+                    csw_std.set_index("condition_id")[metric]
+                    .reindex(csw_mean["condition_id"])
+                    .values
+                )
 
-        plotted_any = True
+            if yerr is not None:
+                ax.errorbar(
+                    x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
+                )
+            else:
+                ax.plot(x, y, "-o", linewidth=1.6, label=fam)
+
+            _style(ax, fontsize, title=title, xlabel="α (symmetry mix)", ylabel=metric)
+            plotted_any = True
 
     if not plotted_any:
         print("[SKIP] fig2_symmetry_vs_performance: no target metrics present")
         return
+
+    # --- Legends & title ---
+    for ax in axs:
+        ax.legend(frameon=False, fontsize=max(8, fontsize - 2))
+
+    if single_family:
+        fig.suptitle(
+            f"Performance vs Mixing Ratio (condition: {single_family})",
+            fontsize=fontsize + 2,
+        )
+    else:
+        fig.suptitle("Performance vs Mixing Ratio", fontsize=fontsize + 2)
 
     fig.tight_layout()
     if savepath:
@@ -796,7 +821,6 @@ def main(argv=None):
     if args.cond_glob:
         cond_roots.extend(sorted(glob.glob(args.cond_glob)))
 
-    print(cond_roots)
     if cond_roots:
         # Multi-condition path
         rl, cs, off, ev = load_many_conditions(cond_roots)
@@ -807,8 +831,6 @@ def main(argv=None):
     rl = _filter_df(rl, args.condition_regex, args.run_regex)
     cs = _filter_df(cs, args.condition_regex, args.run_regex)
     off = _filter_df(off, args.condition_regex, args.run_regex)
-
-    print("cs none?", cs is None)
 
     _ensure_dir(args.figdir)
     requested = (

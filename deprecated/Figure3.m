@@ -1,4 +1,4 @@
-% Load in representations from trained model
+Figure3.m% Load in representations from trained model
 
 Path = '~/Documents/HCPrediction/Elman_SGD/Sigmoid/';
 N_in = 1;

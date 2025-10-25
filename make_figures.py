@@ -286,7 +286,7 @@ def _savefig(fig, path):
 
 
 # ---------------------------
-# Figure 1 – Convergence speed
+# Figure 1 – Training speed
 # ---------------------------
 
 
@@ -480,8 +480,6 @@ def fig2_symmetry_vs_performance(condition_df, savepath=None, fontsize=12):
         ("Open-loop MSE (↓) vs α", "mse_open"),
         ("Best training loss (↓) vs α", "best_loss"),
     ]
-
-    import math
 
     fig, axs = plt.subplots(1, 2, figsize=(10, 3.6))
     axs = np.array(axs).reshape(-1)
@@ -789,6 +787,7 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    suffix = f"_{args.figtag}" if args.figtag else ""
 
     # Build list of condition roots if provided
     cond_roots = []
@@ -797,6 +796,7 @@ def main(argv=None):
     if args.cond_glob:
         cond_roots.extend(sorted(glob.glob(args.cond_glob)))
 
+    print(cond_roots)
     if cond_roots:
         # Multi-condition path
         rl, cs, off, ev = load_many_conditions(cond_roots)
@@ -808,6 +808,8 @@ def main(argv=None):
     cs = _filter_df(cs, args.condition_regex, args.run_regex)
     off = _filter_df(off, args.condition_regex, args.run_regex)
 
+    print("cs none?", cs is None)
+
     _ensure_dir(args.figdir)
     requested = (
         set([s.strip() for s in args.just.split(",") if s.strip()])
@@ -818,9 +820,8 @@ def main(argv=None):
     def want(k):
         return (not requested) or (str(k) in requested)
 
-    suffix = f"_{args.figtag}" if args.figtag else ""
-    fig1_path = os.path.join(args.figdir, f"fig1_training_dynamics{suffix}.png")
     if want(1):
+        fig1_path = os.path.join(args.figdir, f"fig1_training_dynamics{suffix}.png")
         fig1_training_dynamics(
             cond_roots if cond_roots else [args.agg_dir],
             fig1_path,
@@ -831,17 +832,17 @@ def main(argv=None):
             logyB=args.fig1_logyB,
         )
     if want(2):
-        fig2_symmetry_vs_performance(
-            cs,
-            savepath=os.path.join(args.figdir, "fig2_symmetry_vs_performance.png"),
-            fontsize=args.fontsize,
+        fig2_path = os.path.join(
+            args.figdir, f"fig2_symmetry_vs_performance{suffix}.png"
         )
+        fig2_symmetry_vs_performance(cs, savepath=fig2_path, fontsize=args.fontsize)
     if want(3):
         cond_for_fig3 = cond_roots[0] if cond_roots else args.agg_dir
+        fig3_path = os.path.join(args.figdir, f"fig3_traveling_and_polar{suffix}.png")
         fig3_traveling_wave_and_polar(
             condition_dir=cond_for_fig3,
             run_select="best_replay",
-            savepath=os.path.join(args.figdir, "fig3_traveling_and_polar.png"),
+            savepath=fig3_path,
             fontsize=args.fontsize,
         )
 

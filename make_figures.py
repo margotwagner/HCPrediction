@@ -554,10 +554,12 @@ def fig2_symmetry_vs_performance(condition_df, savepath=None, fontsize=12):
 
 def fig3_traveling_wave_and_polar(
     condition_dir,
-    run_select="best_replay",  # "best_replay" or "best_mse"
+    run_select="best_replay",  # best_replay or best_mse
     savepath=None,
     fontsize=12,
     max_units=100,
+    vmin=None,
+    vmax=None,
 ):
     """
     Panel A: hidden heatmaps (replay & prediction), time x unit (units sorted by peak time).
@@ -692,12 +694,27 @@ def fig3_traveling_wave_and_polar(
         order = np.argsort(peak_t)
         if Z.shape[1] > max_units:
             order = order[:max_units]
-        Zs = Z[:, order].T  # [units, time] for nicer heatmap orientation
+        Zs = Z[:, order].T  # [units, time]
 
-        im = ax.imshow(Zs, aspect="auto", interpolation="nearest")
+        # flexible vmin/vmax
+        vmin_eff = np.min(Zs) if vmin is None else vmin
+        vmax_eff = np.max(Zs) if vmax is None else vmax
+
+        im = ax.imshow(
+            Zs,
+            aspect="auto",
+            interpolation="nearest",
+            cmap="viridis",
+            vmin=vmin_eff,
+            vmax=vmax_eff,
+        )
         ax.set_title(title)
         ax.set_xlabel("time")
         ax.set_ylabel("units (sorted)")
+
+        # add colorbar
+        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.set_ylabel("activation (z)", rotation=270, labelpad=15)
         return im
 
     axA = fig.add_subplot(gs[0, 0])
@@ -792,9 +809,9 @@ def parse_args(argv=None):
     )
     p.add_argument(
         "--cond_glob",
-        type=str,
-        default="",
-        help="Glob that expands to multiple condition roots (e.g. './runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/*')",
+        nargs="+",  # accept 1..N globs
+        default=[],
+        help="One or more globs for condition roots (space- or comma-separated). Example: --cond_glob './runs/.../sym*/shiftmh_*' './runs/.../sym*/shiftcycmh_*'",
     )
     p.add_argument("--fig1_logxA", action="store_true", help="Fig1A: log x-axis")
     p.add_argument("--fig1_logyA", action="store_true", help="Fig1A: log y-axis")
@@ -805,6 +822,18 @@ def parse_args(argv=None):
         type=str,
         default="",
         help="Append this tag to output figure filenames",
+    )
+    p.add_argument(
+        "--vmin",
+        type=float,
+        default=None,
+        help="Minimum value for color scale in Figure 3 heatmaps",
+    )
+    p.add_argument(
+        "--vmax",
+        type=float,
+        default=None,
+        help="Maximum value for color scale in Figure 3 heatmaps",
     )
 
     return p.parse_args(argv)
@@ -819,7 +848,19 @@ def main(argv=None):
     if args.conditions:
         cond_roots.extend([s.strip() for s in args.conditions.split(",") if s.strip()])
     if args.cond_glob:
-        cond_roots.extend(sorted(glob.glob(args.cond_glob)))
+        # args.cond_glob is a list when provided; support comma-separated inside each
+        raw_entries = (
+            args.cond_glob
+            if isinstance(args.cond_glob, (list, tuple))
+            else [args.cond_glob]
+        )
+        patterns = []
+        for entry in raw_entries:
+            # split on commas but keep simple whitespace-only entries too
+            for part in [s.strip() for s in re.split(r",", entry) if s.strip()]:
+                patterns.append(part)
+        for pat in patterns:
+            cond_roots.extend(sorted(glob.glob(pat)))
 
     if cond_roots:
         # Multi-condition path
@@ -866,6 +907,9 @@ def main(argv=None):
             run_select="best_replay",
             savepath=fig3_path,
             fontsize=args.fontsize,
+            max_units=100,
+            vmin=args.vmin,
+            vmax=args.vmax,
         )
 
 

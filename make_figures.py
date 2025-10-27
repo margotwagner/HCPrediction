@@ -279,8 +279,12 @@ def _style(ax, fontsize=12, title=None, xlabel=None, ylabel=None, legend=False):
 
 def _savefig(fig, path):
     _ensure_dir(os.path.dirname(path))
-    fig.tight_layout()
-    fig.savefig(path, dpi=200)
+    # Use constrained layout if available
+    try:
+        fig.set_constrained_layout(True)
+    except Exception:
+        fig.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print("[SAVE]", path)
 
@@ -677,8 +681,8 @@ def fig3_traveling_wave_and_polar(
         return
 
     # --- Panel A: heatmaps ---
-    fig = plt.figure(figsize=(12, 6))
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.2, 1.0], hspace=0.3, wspace=0.25)
+    fig = plt.figure(figsize=(12, 6), constrained_layout=True)
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.2, 1.0])
 
     # helper to plot one heatmap (first batch only)
     def _heatmap(ax, H, title):
@@ -734,27 +738,51 @@ def fig3_traveling_wave_and_polar(
     # --- Panel B: polar plots ---
     axC = fig.add_subplot(gs[1, :], projection="polar")
 
-    def _plot_polar(ax, hdr, arr, label_pred, label_true=None):
+    def _plot_polar(ax, hdr, arr, label_pred, label_true=None, color=None):
+        """Plot decoded (solid) and true (dashed) with a shared color for clarity."""
         if arr is None:
             return
         cols = {name: i for i, name in enumerate(hdr)}
         t = arr[:, cols.get("t", 0)]
         tp = arr[:, cols.get("theta_pred", 1)]
-        if "theta_true" in cols:
-            tt = arr[:, cols["theta_true"]]
-        else:
-            tt = None
-        ax.plot(tp, t, lw=1.5, label=label_pred)
-        if tt is not None:
-            ax.plot(tt, t, lw=1.0, linestyle="--", label=label_true)
+        tt = arr[:, cols["theta_true"]] if "theta_true" in cols else None
 
-    _plot_polar(axC, rp_hdr, rp_ang, label_pred="Replay θ̂(t)")
+        # decoded (solid)
+        (ln_pred,) = ax.plot(tp, t, lw=1.8, label=label_pred, color=color)
+        # true (dashed), same hue as decoded
+        if tt is not None:
+            ax.plot(
+                tt,
+                t,
+                lw=1.5,
+                linestyle="--",
+                label=(label_true or f"{label_pred} (true)"),
+                color=ln_pred.get_color() if color is None else color,
+            )
+
+    # Replay: blue (C0)
+    _plot_polar(axC, rp_hdr, rp_ang, label_pred="Replay θ̂(t)", color="C0")
+
+    # Prediction: orange (C1) with explicit labels
     _plot_polar(
-        axC, pr_hdr, pr_ang, label_pred="Prediction θ̂(t)", label_true="Prediction θ(t)"
+        axC,
+        pr_hdr,
+        pr_ang,
+        label_pred="Prediction θ̂(t) (decoded)",
+        label_true="Prediction θ(t) (ground truth)",
+        color="C1",
     )
 
-    axC.set_title("Polar: decoded angle vs time")
-    axC.legend(loc="upper right", bbox_to_anchor=(1.2, 1.0))
+    axC.set_title("Polar: decoded vs true angle over time")
+
+    # Move legend OUTSIDE the polar axes (right side, vertically centered)
+    axC.legend(
+        loc="center left",
+        bbox_to_anchor=(1.10, 0.5),
+        frameon=False,
+        fontsize=max(8, fontsize - 2),
+    )
+
     fig.suptitle(
         f"Fig 3 — Traveling-wave & Polar (condition: {condition_dir.name}, run: {run_id})",
         fontsize=fontsize + 2,

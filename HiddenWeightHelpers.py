@@ -192,6 +192,51 @@ def normalize_by_spectral(
     return W2, {"scale": s, "sigma_before": smax, "sigma_after": smax2, "status": "ok"}
 
 
+# ---- Structured noise + Frobenius renorm ------------------------------------
+def add_noise_preserve_structure(
+    W: np.ndarray,
+    noise_std: float = 1e-2,
+    mode: str = "support_only",  # "support_only" | "offdiag" | "all"
+    sym_mode: str = "none",  # "none" | "sym" | "skew" | "mix"
+    sym_mix: float = 0.2,  # if sym_mode == "mix": W' = (1-sym_mix)*sym + sym_mix*skew
+    seed: int = 0,
+) -> Tuple[np.ndarray, Dict]:
+    """
+    Add small Gaussian noise without destroying the motif; then Frobenius-renormalize
+    back to the original Frobenius norm.
+
+    Recommended defaults:
+      - shift / shiftcyc        -> mode="offdiag" or "support_only"
+      - mex-hat (toeplitz/cyc)  -> mode="support_only"
+    """
+    # remember target Frobenius (scale)
+    target_fro = float(np.linalg.norm(W, ord="fro"))
+
+    # 1) add small Gaussian noise (your util scales by 1/sqrt(H))
+    Wn, info_n = add_gaussian_noise_np(W, noise_std=noise_std, seed=seed, mode=mode)
+
+    # 2) (optional) project to symmetry/skew subspace
+    if sym_mode != "none":
+        S, K = decompose_sym_skew(Wn)
+        if sym_mode == "sym":
+            Wn = S
+        elif sym_mode == "skew":
+            Wn = K
+        elif sym_mode == "mix":
+            Wn = (1.0 - sym_mix) * S + sym_mix * K
+
+    # 3) renormalize back to same Frobenius norm
+    Wn, info_f = normalize_by_fro(Wn, target_fro=target_fro)
+
+    info = {
+        "noise": info_n,
+        "fro_renorm": info_f,
+        "sym_mode": sym_mode,
+        "sym_mix": sym_mix,
+    }
+    return Wn.astype(np.float32), info
+
+
 # ---------- Symmetric / skew decompositions ----------
 
 

@@ -148,7 +148,6 @@ def build_with_noise(
     builder_fn,  # e.g., build_shift, build_mexican_hat, ...
     *bargs,  # args for that builder
     noise_std: float = 1e-2,
-    mode: str = "support_only",
     sym_mode: str = "none",
     sym_mix: float = 0.2,
     seed: int = 0,
@@ -164,7 +163,6 @@ def build_with_noise(
     Wn, info = add_noise_preserve_structure(
         W0,
         noise_std=noise_std,
-        mode=mode,
         sym_mode=sym_mode,
         sym_mix=sym_mix,
         seed=seed,

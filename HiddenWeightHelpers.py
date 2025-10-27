@@ -196,7 +196,6 @@ def normalize_by_spectral(
 def add_noise_preserve_structure(
     W: np.ndarray,
     noise_std: float = 1e-2,
-    mode: str = "support_only",  # "support_only" | "offdiag" | "all"
     sym_mode: str = "none",  # "none" | "sym" | "skew" | "mix"
     sym_mix: float = 0.2,  # if sym_mode == "mix": W' = (1-sym_mix)*sym + sym_mix*skew
     seed: int = 0,
@@ -213,7 +212,7 @@ def add_noise_preserve_structure(
     target_fro = float(np.linalg.norm(W, ord="fro"))
 
     # 1) add small Gaussian noise (your util scales by 1/sqrt(H))
-    Wn, info_n = add_gaussian_noise_np(W, noise_std=noise_std, seed=seed, mode=mode)
+    Wn, info_n = add_gaussian_noise_np(W, noise_std=noise_std, seed=seed)
 
     # 2) (optional) project to symmetry/skew subspace
     if sym_mode != "none":
@@ -383,7 +382,6 @@ def add_gaussian_noise_np(
     W: np.ndarray,
     noise_std: float,
     seed: Optional[int] = None,
-    mode: str = "all",  # "all" | "offdiag" | "support_only"
     scale_by_sqrtN: bool = True,  # scale noise by 1/sqrt(H)
 ) -> Tuple[np.ndarray, Dict]:
     """
@@ -397,10 +395,6 @@ def add_gaussian_noise_np(
     noise_std : float
         Amplitude multiplier for the Gaussian noise.
     seed : Optional[int]
-    mode : str
-        "all"          -> add noise to all entries
-        "offdiag"      -> no noise on diagonal
-        "support_only" -> add noise only where |W|>0 (preserve sparsity pattern)
     scale_by_sqrtN : bool
         If True, divide the raw noise by sqrt(H).
 
@@ -416,16 +410,9 @@ def add_gaussian_noise_np(
     if scale_by_sqrtN and H > 0:
         noise = noise / np.sqrt(H)
 
-    if mode == "offdiag":
-        np.fill_diagonal(noise, 0.0)
-    elif mode == "support_only":
-        mask = (np.abs(W) > 0).astype(np.float32)
-        noise = noise * mask
-
     W_noisy = W.astype(np.float32) + float(noise_std) * noise
 
     info = {
-        "mode": mode,
         "noise_std": float(noise_std),
         "effective_entry_std": float(noise_std / np.sqrt(H))
         if scale_by_sqrtN and H > 0

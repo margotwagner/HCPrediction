@@ -272,7 +272,9 @@ def main():
                 and args.alpha is not None
             ):
                 fname_bits.append(_alpha_tag(args.alpha))
-        fname_bits.append(_noisy_suffix(args.noisy))
+        suffix = _noisy_suffix(args.noisy)
+        if suffix:
+            fname_bits[-1] += suffix
         if args.run_tag:
             fname_bits.append(str(args.run_tag))
         # make folder and set savename base (no extension)

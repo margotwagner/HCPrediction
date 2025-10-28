@@ -28,6 +28,13 @@ python evaluate.py \
   --mode all \
   --csv ./runs/ElmanRNN/shift-variants/identity/frobenius/identity_n100_fro/identity_n100_fro_eval.csv
 
+# NOISY IDENTITY
+python evaluate.py \
+  --base-dir ./runs/ElmanRNN/noisy/shift-variants/identity/frobenius/identity_n100_fro_noisy \
+  --runs 0-2 \
+  --mode all \
+  --csv ./runs/ElmanRNN/noisy/shift-variants/identity/frobenius/identity_n100_fro_noisy/identity_n100_fro_eval_noisy.csv
+
 # CENTERED MH
 python evaluate.py \
   --base-dir ./runs/ElmanRNN/mh-variants/cent/frobenius/centmh_n100_fro \
@@ -60,10 +67,14 @@ python offline_metrics.py --ckpt ./runs/ElmanRNN/mh-variants/shifted/
 
 python offline_metrics.py --ckpt ./runs/ElmanRNN/shift-variants/identity/
 
+python offline_metrics.py --ckpt ./runs/ElmanRNN/noisy/shift-variants/identity/
+
 # 4.) Aggregate across runs (condition-level tables)
 python aggregate_metrics.py --root ./runs/ElmanRNN/random-init/random_n100
 
 python aggregate_metrics.py --root ./runs/ElmanRNN/shift-variants/identity/frobenius/identity_n100_fro
+
+python aggregate_metrics.py --root ./runs/ElmanRNN/noisy/shift-variants/identity/frobenius/identity_n100_fro_noisy
 
 python aggregate_metrics.py --root ./runs/ElmanRNN/mh-variants/cent-cyc/frobenius/centcycmh_n100_fro
 

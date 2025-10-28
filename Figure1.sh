@@ -38,3 +38,17 @@ python make_figures.py --just 1 \
 python make_figures.py --just 1 \
   --conditions "$conds_csv" \
   --figdir ./figs/fig1 --figtag raw_best
+
+# NOISE
+conditions=(
+  "./runs/ElmanRNN/random-init/random_n100"
+  "./runs/ElmanRNN/shift-variants/identity/frobenius/identity_n100_fro"
+  "./runs/ElmanRNN/noisy/shift-variants/identity/frobenius/identity_n100_fro_noisy"
+)
+IFS=, conds_csv="${conditions[*]}"; unset IFS
+python make_figures.py --just 1 \
+  --conditions "$conds_csv" \
+  --figdir ./figs/fig1 --figtag raw_id_noisy
+python make_figures.py --just 1 \
+--conditions "$conds_csv" \
+--figdir ./figs/fig1 --figtag loglog_id_noisy --fig1_logxA --fig1_logxB --fig1_logyA --fig1_logyB

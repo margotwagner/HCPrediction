@@ -406,7 +406,7 @@ def fig1_training_dynamics(
         x, m, s = _mean_sem_align(runs, "spectral_radius")
         if x is None:
             continue
-        axC.plot(x, m, lw=2, label=cond)
+        axC.plot(x, m, lw=2, label=_short_label_from_root(cond))
         axC.fill_between(x, m - s, m + s, alpha=0.15)
     _style(
         axC,
@@ -422,7 +422,7 @@ def fig1_training_dynamics(
         x, m, s = _mean_sem_align(runs, "fro_W")
         if x is None:
             continue
-        axD.plot(x, m, lw=2, label=cond)
+        axD.plot(x, m, lw=2, label=_short_label_from_root(cond))
         axD.fill_between(x, m - s, m + s, alpha=0.15)
     _style(
         axD,
@@ -474,8 +474,8 @@ def fig2_symmetry_vs_performance(condition_df, savepath=None, fontsize=12):
 
     # --- Set up figure panels ---
     panels = [
-        ("Open-loop MSE (↓) vs α", "mse_open"),
-        ("Best training loss (↓) vs α", "best_loss"),
+        ("Open-loop MSE (↓) vs α₀", "mse_open"),
+        ("Best training loss (↓) vs α₀", "best_loss"),
     ]
     fig, axs = plt.subplots(1, 2, figsize=(10, 3.6))
     axs = np.array(axs).reshape(-1)
@@ -525,7 +525,13 @@ def fig2_symmetry_vs_performance(condition_df, savepath=None, fontsize=12):
             else:
                 ax.plot(x, y, "-o", linewidth=1.6, label=fam)
 
-            _style(ax, fontsize, title=title, xlabel="α (symmetry mix)", ylabel=metric)
+            _style(
+                ax,
+                fontsize,
+                title=title,
+                xlabel=r"$\alpha_0$ (symmetry at $t=0$)",
+                ylabel=metric,
+            )
             plotted_any = True
 
     if not plotted_any:
@@ -538,11 +544,11 @@ def fig2_symmetry_vs_performance(condition_df, savepath=None, fontsize=12):
 
     if single_family:
         fig.suptitle(
-            f"Performance vs Mixing Ratio (condition: {single_family})",
+            f"Performance vs Initial Mixing Ratio (condition: {single_family})",
             fontsize=fontsize + 2,
         )
     else:
-        fig.suptitle("Performance vs Mixing Ratio", fontsize=fontsize + 2)
+        fig.suptitle("Performance vs Initial Mixing Ratio", fontsize=fontsize + 2)
 
     fig.tight_layout()
     if savepath:

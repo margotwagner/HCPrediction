@@ -219,6 +219,11 @@ parser.add_argument(
     default=-1,
     help="If >=0, start run numbering at this index; otherwise auto-pick the next free index.",
 )
+parser.add_argument(
+    "--noisy",
+    action="store_true",
+    help="If set, use 'noisy' hidden-weight init base and save under ./runs/ElmanRNN/noisy/... (otherwise 'clean').",
+)
 
 
 def main():
@@ -237,14 +242,22 @@ def main():
     if not args.savename:
         if args.whh_type == "none":
             # No override: keep it simple but structured
-            out_dir = os.path.join(args.out_root, "ElmanRNN", "random-init")
+            out_dir = os.path.join(
+                args.out_root, "ElmanRNN", _mode_dir(args.noisy), "random-init"
+            )
+
             prefix = _prefix_from_type("none")  # "random"
             fname_bits = [f"{prefix}_n{hidden_N}"]
         else:
             variant = _resolve_variant(args.whh_type)
             norm_dir = args.whh_norm
             out_dir = os.path.join(
-                args.out_root, "ElmanRNN", variant, args.whh_type, norm_dir
+                args.out_root,
+                "ElmanRNN",
+                _mode_dir(args.noisy),
+                variant,
+                args.whh_type,
+                norm_dir,
             )
             if (
                 args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
@@ -259,7 +272,7 @@ def main():
                 and args.alpha is not None
             ):
                 fname_bits.append(_alpha_tag(args.alpha))
-
+        fname_bits.append(_noisy_suffix(args.noisy))
         if args.run_tag:
             fname_bits.append(str(args.run_tag))
         # make folder and set savename base (no extension)
@@ -296,7 +309,7 @@ def main():
     if args.whh_type != "none":
         try:
             path = _resolve_hidden_path(
-                hidden_N, args.whh_type, args.whh_norm, args.alpha
+                hidden_N, args.whh_type, args.whh_norm, args.alpha, noisy=args.noisy
             )
             log(f"[whh] loading hidden weight from: {path}")
             _load_hidden_into_elman(net, path, device=net.rnn.weight_hh_l0.device)
@@ -434,7 +447,7 @@ def main():
         if args.whh_type != "none":
             try:
                 path = _resolve_hidden_path(
-                    hidden_N, args.whh_type, args.whh_norm, args.alpha
+                    hidden_N, args.whh_type, args.whh_norm, args.alpha, noisy=args.noisy
                 )
                 log(f"[whh] loading hidden weight from: {path}")
                 _load_hidden_into_elman(net, path, device=net.rnn.weight_hh_l0.device)
@@ -979,15 +992,25 @@ def _norm_shortname(norm: str) -> str:
     return {"frobenius": "fro", "raw": "raw"}[norm]
 
 
+def _mode_dir(noisy: bool) -> str:
+    return "noisy" if noisy else "clean"
+
+
+def _noisy_suffix(noisy: bool) -> str:
+    return "_noisy" if noisy else ""
+
+
 def _resolve_hidden_path(
     hidden_N: int,
     whh_type: str,
     whh_norm: str,
     alpha: Optional[float] = None,
+    noisy: bool = False,
 ) -> str:
     variant = _resolve_variant(whh_type)
     norm_dir = whh_norm  # directory name is full strategy
-    base = f"./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/{variant}/{whh_type}/{norm_dir}"
+    mode = _mode_dir(noisy)
+    base = f"./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/{mode}/{variant}/{whh_type}/{norm_dir}"
     # alpha tag needed for {shifted, shifted-cyc, shift, shift-cyc}
     if whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}:
         if alpha is None:
@@ -998,7 +1021,7 @@ def _resolve_hidden_path(
     prefix = _prefix_from_type(whh_type)
     norm_short = _norm_shortname(whh_norm)
     # If your files are strictly n100, set hidden_N=100 (or hardcode 100 here).
-    fname = f"{prefix}_n{hidden_N}_{norm_short}.npy"
+    fname = f"{prefix}_n{hidden_N}_{norm_short}" + _noisy_suffix(noisy) + ".npy"
     return os.path.join(base, fname)
 
 

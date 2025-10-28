@@ -1,6 +1,6 @@
 python Main_clean.py --input data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar --ae 1 --fixi 2 --fixo 2 --pred 1 --n 100 --hidden-n 100 --ac_output sigmoid --epochs 100000 --whh_type none --num_runs 6
 
-python Main_clean.py --input data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar --ae 1 --fixi 2 --fixo 2 --pred 1 --n 100 --hidden-n 100 --ac_output sigmoid --epochs 100000 --whh_type cent --whh_norm frobenius --num_runs 3
+nohup python Main_clean.py --input data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar --ae 1 --fixi 2 --fixo 2 --pred 1 --n 100 --hidden-n 100 --ac_output sigmoid --epochs 100000 --whh_type identity --whh_norm frobenius --num_runs 3 --noisy & 
 
 python Main_clean.py \
   --input data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar \

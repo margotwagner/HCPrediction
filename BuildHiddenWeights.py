@@ -3,7 +3,6 @@
 # =========================
 from typing import Optional
 import numpy as np
-from HiddenWeightHelpers import add_noise_preserve_structure
 
 # All builders return NumPy arrays (float32).
 # Any normalization/plots/saving are in HiddenWeightHelpers.py.
@@ -142,29 +141,3 @@ def build_orthogonal(
     if ensure_det_pos and np.linalg.det(Q) < 0:
         Q[:, 0] *= -1.0
     return (scale * Q).astype(np.float32)
-
-
-def build_with_noise(
-    builder_fn,  # e.g., build_shift, build_mexican_hat, ...
-    *bargs,  # args for that builder
-    noise_std: float = 1e-2,
-    sym_mode: str = "none",
-    sym_mix: float = 0.2,
-    seed: int = 0,
-    **bkwargs,
-):
-    """
-    Convenience: build a motif, add structured noise, renorm by Frobenius.
-    Example:
-      W = build_with_noise(build_shift, n=100, value=1.0, offset=1, cyclic=False,
-                           noise_std=1e-2, mode="offdiag", sym_mode="none")
-    """
-    W0 = builder_fn(*bargs, **bkwargs)
-    Wn, info = add_noise_preserve_structure(
-        W0,
-        noise_std=noise_std,
-        sym_mode=sym_mode,
-        sym_mix=sym_mix,
-        seed=seed,
-    )
-    return Wn, info

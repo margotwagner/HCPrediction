@@ -1,9 +1,8 @@
 # =========================
-# HWHelpers.py — plotting, stats, saving, normalization, symmetry, open-loop (Py3.6 compatible)
+# HiddenWeightHelpers.py — plotting, stats, saving, normalization, symmetry, open-loop (Py3.6 compatible)
 # =========================
 import os, json, re
 from typing import Optional, Tuple, Dict
-
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -192,48 +191,55 @@ def normalize_by_spectral(
     return W2, {"scale": s, "sigma_before": smax, "sigma_after": smax2, "status": "ok"}
 
 
-# ---- Structured noise + Frobenius renorm ------------------------------------
-def add_noise_preserve_structure(
+# ---- Gaussian noise helpers ---------------------------------------------------
+import numpy as np
+from typing import Optional, Tuple, Dict
+
+
+def add_gaussian_noise_all(
     W: np.ndarray,
-    noise_std: float = 1e-2,
-    sym_mode: str = "none",  # "none" | "sym" | "skew" | "mix"
-    sym_mix: float = 0.2,  # if sym_mode == "mix": W' = (1-sym_mix)*sym + sym_mix*skew
-    seed: int = 0,
+    noise_std: float,
+    seed: Optional[int] = None,
+    scale_by_sqrtN: bool = True,
 ) -> Tuple[np.ndarray, Dict]:
     """
-    Add small Gaussian noise without destroying the motif; then Frobenius-renormalize
-    back to the original Frobenius norm.
-
-    Recommended defaults:
-      - shift / shiftcyc        -> mode="offdiag" or "support_only"
-      - mex-hat (toeplitz/cyc)  -> mode="support_only"
+    Add i.i.d. Gaussian noise to *every* entry of W.
+    If scale_by_sqrtN=True (default), noise is divided by sqrt(H) so noise_std
+    is comparable across different hidden sizes.
     """
-    # remember target Frobenius (scale)
-    target_fro = float(np.linalg.norm(W, ord="fro"))
-
-    # 1) add small Gaussian noise (your util scales by 1/sqrt(H))
-    Wn, info_n = add_gaussian_noise_np(W, noise_std=noise_std, seed=seed)
-
-    # 2) (optional) project to symmetry/skew subspace
-    if sym_mode != "none":
-        S, K = decompose_sym_skew(Wn)
-        if sym_mode == "sym":
-            Wn = S
-        elif sym_mode == "skew":
-            Wn = K
-        elif sym_mode == "mix":
-            Wn = (1.0 - sym_mix) * S + sym_mix * K
-
-    # 3) renormalize back to same Frobenius norm
-    Wn, info_f = normalize_by_fro(Wn, target_fro=target_fro)
-
+    rng = np.random.default_rng(seed)
+    H = W.shape[0]
+    scale = (1.0 / np.sqrt(H)) if scale_by_sqrtN else 1.0
+    eps = rng.standard_normal(size=W.shape).astype(W.dtype) * (noise_std * scale)
+    W_noisy = (W + eps).astype(W.dtype)
     info = {
-        "noise": info_n,
-        "fro_renorm": info_f,
-        "sym_mode": sym_mode,
-        "sym_mix": sym_mix,
+        "noise_std": float(noise_std),
+        "scale_by_sqrtN": bool(scale_by_sqrtN),
+        "H": int(H),
     }
-    return Wn.astype(np.float32), info
+    return W_noisy, info
+
+
+def add_noise_and_fro_norm(
+    W: np.ndarray,
+    noise_std: float,
+    target_fro: Optional[float] = None,
+    seed: Optional[int] = None,
+    scale_by_sqrtN: bool = True,
+) -> Tuple[np.ndarray, Dict]:
+    """
+    Add Gaussian noise everywhere (see add_gaussian_noise_all), then Frobenius-normalize.
+    If target_fro is None, preserve W's original Frobenius norm; else hit target_fro.
+    """
+    fro_keep = (
+        float(np.linalg.norm(W, ord="fro")) if target_fro is None else float(target_fro)
+    )
+    W_noisy, info_n = add_gaussian_noise_all(
+        W, noise_std=noise_std, seed=seed, scale_by_sqrtN=scale_by_sqrtN
+    )
+    W_out, info_f = normalize_by_fro(W_noisy, target_fro=fro_keep)
+    info = {"noise": info_n, "fro_norm": info_f}
+    return W_out.astype(np.float32), info
 
 
 # ---------- Symmetric / skew decompositions ----------
@@ -376,47 +382,3 @@ def open_loop_gain_match_and_plots(
         )
 
     return W_scaled, info
-
-
-def add_gaussian_noise_np(
-    W: np.ndarray,
-    noise_std: float,
-    seed: Optional[int] = None,
-    scale_by_sqrtN: bool = True,  # scale noise by 1/sqrt(H)
-) -> Tuple[np.ndarray, Dict]:
-    """
-    Add small i.i.d. Gaussian noise to W.
-
-    Effective noise added is: noise_std * N(0,1) / sqrt(H) if scale_by_sqrtN=True.
-
-    Args
-    ----
-    W : (H,H) np.ndarray
-    noise_std : float
-        Amplitude multiplier for the Gaussian noise.
-    seed : Optional[int]
-    scale_by_sqrtN : bool
-        If True, divide the raw noise by sqrt(H).
-
-    Returns
-    -------
-    W_noisy : (H,H) np.ndarray
-    info : dict with summary of added noise
-    """
-    rng = np.random.default_rng(seed)
-    H = W.shape[0]
-    noise = rng.normal(size=W.shape).astype(np.float32)
-
-    if scale_by_sqrtN and H > 0:
-        noise = noise / np.sqrt(H)
-
-    W_noisy = W.astype(np.float32) + float(noise_std) * noise
-
-    info = {
-        "noise_std": float(noise_std),
-        "effective_entry_std": float(noise_std / np.sqrt(H))
-        if scale_by_sqrtN and H > 0
-        else float(noise_std),
-        "scale_by_sqrtN": bool(scale_by_sqrtN),
-    }
-    return W_noisy, info

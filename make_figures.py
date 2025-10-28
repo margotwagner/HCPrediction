@@ -255,6 +255,35 @@ def _fit_slope(x, y, logx=False, logy=False):
     return float(m)
 
 
+def _pick_time_col_runlevel(df: pd.DataFrame) -> str:
+    """Preferred time key for run_level: epoch > snapshot_idx > synthetic row index."""
+    for c in ("epoch", "snapshot_idx"):
+        if c in df.columns:
+            return c
+    df = df.copy()
+    df["row_idx"] = np.arange(len(df))
+    return "row_idx"
+
+
+def _alpha_series_from_runlevel(df: pd.DataFrame):
+    """
+    Compute alpha = fro_S_offline / (fro_S_offline + fro_A_offline) for every row.
+    Returns (time_col_name, time_values_np, alpha_values_np), or (None,None,None) if unavailable.
+    """
+    if df is None or df.empty:
+        return None, None, None
+    if not {"fro_S_offline", "fro_A_offline"}.issubset(df.columns):
+        return None, None, None
+    tcol = _pick_time_col_runlevel(df)
+    t = pd.to_numeric(df[tcol], errors="coerce").values
+    S = pd.to_numeric(df["fro_S_offline"], errors="coerce").astype(float).values
+    A = pd.to_numeric(df["fro_A_offline"], errors="coerce").astype(float).values
+    denom = S + A
+    with np.errstate(divide="ignore", invalid="ignore"):
+        alpha = np.where(denom > 0, S / denom, np.nan)
+    return tcol, t, alpha
+
+
 # ---------------------------
 # Matplotlib style utilities
 # ---------------------------
@@ -445,112 +474,236 @@ def fig1_training_dynamics(
 # --------------------------------------------
 
 
-def fig2_symmetry_vs_performance(condition_df, savepath=None, fontsize=12):
+def fig2_symmetry_vs_performance(
+    condition_df, run_level_df, savepath=None, fontsize=12
+):
     """
-    Figure 2: Symmetry–performance relations (two panels, curves vs alpha, ±std)
-      Panel A: mse_open (↓) vs α
-      Panel B: best_loss (↓) vs α
-    Supports multiple condition families (e.g., shiftmh, shiftcycmh)
+    Figure 2 (2x2):
+      A: Best training loss (↓) vs α0            [condition_summary: 'best_loss']
+      B: Best open-loop MSE (↓) vs α0            [condition_summary: 'mse_open']
+      C: Best closed-loop MSE (↓) vs α0          [condition_summary: 'mse_free_closed' (preferred)]
+      D: alpha(t) over training (median ± IQR)   [run_level.csv: fro_S_offline,fro_A_offline]
     """
+    # -------------------------
+    # Prepare Figure + axes
+    # -------------------------
+    fig, axs = plt.subplots(2, 2, figsize=(12, 7.5))
+    (axA, axB), (axC, axD) = axs
 
-    # --- Identify family shortnames from condition_id strings ---
+    # -------------------------
+    # Panels A, B, C  — condition_summary
+    # -------------------------
     if condition_df is None or not {"condition_id", "metric", "mean"}.issubset(
         condition_df.columns
     ):
-        print("[SKIP] fig2_symmetry_vs_performance: condition_summary missing columns")
-        return
+        print(
+            "[SKIP] fig2 A–C: condition_summary missing columns 'condition_id','metric','mean'"
+        )
+        for ax in (axA, axB, axC):
+            ax.axis("off")
+    else:
+        df = condition_df.copy()
+        df["shortname"] = df["condition_id"].apply(
+            lambda cid: os.path.basename(str(cid)).split("_")[0]
+        )
+        families = sorted(df["shortname"].unique().tolist())
+        single_family = families[0] if len(families) == 1 else None
 
-    # Extract shortname (basename before first underscore)
-    condition_df = condition_df.copy()
-    condition_df["shortname"] = condition_df["condition_id"].apply(
-        lambda cid: os.path.basename(str(cid)).split("_")[0]
-    )
-
-    # List of distinct families (e.g. ['shiftmh', 'shiftcycmh'])
-    families = sorted(condition_df["shortname"].unique().tolist())
-
-    # If only one family, we’ll use it in the title later
-    single_family = families[0] if len(families) == 1 else None
-
-    # --- Set up figure panels ---
-    panels = [
-        ("Open-loop MSE (↓) vs α₀", "mse_open"),
-        ("Best training loss (↓) vs α₀", "best_loss"),
-    ]
-    fig, axs = plt.subplots(1, 2, figsize=(10, 3.6))
-    axs = np.array(axs).reshape(-1)
-
-    plotted_any = False
-
-    # --- Plot each family separately ---
-    for fam in families:
-        sub = condition_df[condition_df["shortname"] == fam]
-        csw_mean = _cs_to_wide(sub, value_col="mean")
-        csw_std = _cs_to_wide(sub, value_col="std")
-        if csw_mean is None or csw_mean.empty:
-            continue
-
-        # α values
-        csw_mean["alpha"] = csw_mean["condition_id"].apply(_alpha_from_condition_id)
-        csw_mean = csw_mean.dropna(subset=["alpha"]).sort_values("alpha")
-        if csw_std is not None and "condition_id" in csw_std.columns:
-            csw_std["alpha"] = csw_std["condition_id"].apply(_alpha_from_condition_id)
-            csw_std = (
-                csw_std.set_index("condition_id")
-                .reindex(csw_mean["condition_id"])
-                .reset_index()
-            )
-
-        # Plot on both panels
-        for i, (title, metric) in enumerate(panels):
-            ax = axs[i]
-            if metric not in csw_mean.columns:
-                ax.axis("off")
+        plotted_any = {"A": False, "B": False, "C": False}
+        for fam in families:
+            sub = df[df["shortname"] == fam]
+            csw_mean = _cs_to_wide(sub, value_col="mean")
+            csw_std = _cs_to_wide(sub, value_col="std")
+            if csw_mean is None or csw_mean.empty:
                 continue
 
-            x = csw_mean["alpha"].values
-            y = csw_mean[metric].values
-            yerr = None
-            if csw_std is not None and metric in csw_std.columns:
-                yerr = (
-                    csw_std.set_index("condition_id")[metric]
+            # alpha0 from condition_id
+            csw_mean["alpha"] = csw_mean["condition_id"].apply(_alpha_from_condition_id)
+            csw_mean = csw_mean.dropna(subset=["alpha"]).sort_values("alpha")
+            if csw_std is not None and "condition_id" in csw_std.columns:
+                csw_std["alpha"] = csw_std["condition_id"].apply(
+                    _alpha_from_condition_id
+                )
+                csw_std = (
+                    csw_std.set_index("condition_id")
                     .reindex(csw_mean["condition_id"])
-                    .values
+                    .reset_index()
                 )
 
-            if yerr is not None:
-                ax.errorbar(
-                    x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
+            # Panel A: best_loss vs alpha0
+            if "best_loss" in csw_mean.columns:
+                x = csw_mean["alpha"].values
+                y = csw_mean["best_loss"].values
+                if csw_std is not None and "best_loss" in csw_std.columns:
+                    yerr = (
+                        csw_std.set_index("condition_id")["best_loss"]
+                        .reindex(csw_mean["condition_id"])
+                        .values
+                    )
+                    axA.errorbar(
+                        x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
+                    )
+                else:
+                    axA.plot(x, y, "-o", linewidth=1.6, label=fam)
+                _style(
+                    axA,
+                    fontsize,
+                    title="A — Best training loss (↓) vs α₀",
+                    xlabel=r"$\alpha_0$ (symmetry at $t=0$)",
+                    ylabel="best_loss",
+                )
+                plotted_any["A"] = True
+            else:
+                axA.axis("off")
+
+            # Panel B: mse_open vs alpha0
+            if "mse_open" in csw_mean.columns:
+                x = csw_mean["alpha"].values
+                y = csw_mean["mse_open"].values
+                if csw_std is not None and "mse_open" in csw_std.columns:
+                    yerr = (
+                        csw_std.set_index("condition_id")["mse_open"]
+                        .reindex(csw_mean["condition_id"])
+                        .values
+                    )
+                    axB.errorbar(
+                        x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
+                    )
+                else:
+                    axB.plot(x, y, "-o", linewidth=1.6, label=fam)
+                _style(
+                    axB,
+                    fontsize,
+                    title="B — Best open-loop MSE (↓) vs α₀",
+                    xlabel=r"$\alpha_0$",
+                    ylabel="mse_open",
+                )
+                plotted_any["B"] = True
+            else:
+                axB.axis("off")
+
+            # Panel C: closed-loop metric vs alpha0 — STRICT: require 'mse_free_closed'
+            if "mse_free_closed" in csw_mean.columns:
+                x = csw_mean["alpha"].values
+                y = csw_mean["mse_free_closed"].values
+                if csw_std is not None and "mse_free_closed" in csw_std.columns:
+                    yerr = (
+                        csw_std.set_index("condition_id")["mse_free_closed"]
+                        .reindex(csw_mean["condition_id"])
+                        .values
+                    )
+                    axC.errorbar(
+                        x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
+                    )
+                else:
+                    axC.plot(x, y, "-o", linewidth=1.6, label=fam)
+                _style(
+                    axC,
+                    fontsize,
+                    title="C — Best closed-loop MSE (↓) vs α₀ [mse_free_closed]",
+                    xlabel=r"$\alpha_0$",
+                    ylabel="mse_free_closed",
+                )
+                plotted_any["C"] = True
+            else:
+                # Strict behavior: do not substitute any other column
+                if not getattr(fig, "_printed_missing_mse_free_closed", False):
+                    print(
+                        "[SKIP] fig2C: column 'mse_free_closed' not found in condition_summary; skipping Panel C."
+                    )
+                    setattr(fig, "_printed_missing_mse_free_closed", True)
+                axC.axis("off")
+
+        # legends if anything plotted
+        for ax_key, ax in zip(("A", "B", "C"), (axA, axB, axC)):
+            if plotted_any[ax_key]:
+                ax.legend(frameon=False, fontsize=max(8, fontsize - 2))
+
+        if any(plotted_any.values()):
+            if single_family:
+                fig.suptitle(
+                    f"Figure 2 — Performance vs α₀ (condition: {single_family})",
+                    fontsize=fontsize + 2,
                 )
             else:
-                ax.plot(x, y, "-o", linewidth=1.6, label=fam)
+                fig.suptitle("Figure 2 — Performance vs α₀", fontsize=fontsize + 2)
+
+    # -------------------------
+    # Panel D — alpha(t) from run_level.csv
+    # -------------------------
+    if run_level_df is None or run_level_df.empty:
+        axD.axis("off")
+        axD.set_title("D — alpha(t): no run_level.csv", fontsize=fontsize)
+    else:
+        df_rl = run_level_df.copy()
+        if "condition_id" not in df_rl.columns:
+            if "condition_root" in df_rl.columns:
+                df_rl["condition_id"] = df_rl["condition_root"].apply(
+                    _infer_condition_id_from_root
+                )
+            else:
+                df_rl["condition_id"] = "condition"
+
+        have_cols = {"fro_S_offline", "fro_A_offline"} <= set(df_rl.columns)
+        tcol = _pick_time_col_runlevel(df_rl) if have_cols else None
+
+        if not have_cols or tcol is None:
+            axD.axis("off")
+            axD.set_title(
+                "D — alpha(t): missing fro_S_offline/fro_A_offline or time",
+                fontsize=fontsize,
+            )
+        else:
+            # thin per-run lines
+            group_keys = ["condition_id"] + (
+                ["run_id"] if "run_id" in df_rl.columns else []
+            )
+            for _, g in df_rl.groupby(group_keys):
+                tcol_g, t, a = _alpha_series_from_runlevel(g)
+                if tcol_g is None:
+                    continue
+                order = np.argsort(t)
+                axD.plot(t[order], a[order], lw=1, alpha=0.25)
+
+            # per-condition median + IQR
+            for cond, cdf in df_rl.groupby("condition_id"):
+                tcol_c, _, _ = _alpha_series_from_runlevel(cdf)
+                if tcol_c is None:
+                    continue
+                xs = np.sort(
+                    pd.to_numeric(cdf[tcol_c], errors="coerce").dropna().unique()
+                )
+                med, q1, q3 = [], [], []
+                for x in xs:
+                    sub = cdf[pd.to_numeric(cdf[tcol_c], errors="coerce") == x]
+                    _, _, a = _alpha_series_from_runlevel(sub)
+                    a = a[np.isfinite(a)]
+                    if a.size == 0:
+                        med.append(np.nan)
+                        q1.append(np.nan)
+                        q3.append(np.nan)
+                    else:
+                        med.append(np.nanmedian(a))
+                        q1.append(np.nanpercentile(a, 25))
+                        q3.append(np.nanpercentile(a, 75))
+                xs = xs.astype(float)
+                axD.plot(xs, med, lw=2.5, label=str(cond))
+                axD.fill_between(xs, q1, q3, alpha=0.15)
 
             _style(
-                ax,
+                axD,
                 fontsize,
-                title=title,
-                xlabel=r"$\alpha_0$ (symmetry at $t=0$)",
-                ylabel=metric,
+                title="D — alpha(t) from run_level",
+                xlabel="epoch",
+                ylabel=r"alpha(t) = $\|S\|_F / (\|S\|_F + \|A\|_F)$",
+                legend=True,
             )
-            plotted_any = True
 
-    if not plotted_any:
-        print("[SKIP] fig2_symmetry_vs_performance: no target metrics present")
-        return
-
-    # --- Legends & title ---
-    for ax in axs:
-        ax.legend(frameon=False, fontsize=max(8, fontsize - 2))
-
-    if single_family:
-        fig.suptitle(
-            f"Performance vs Initial Mixing Ratio (condition: {single_family})",
-            fontsize=fontsize + 2,
-        )
-    else:
-        fig.suptitle("Performance vs Initial Mixing Ratio", fontsize=fontsize + 2)
-
-    fig.tight_layout()
+    # Layout & save
+    try:
+        fig.set_constrained_layout(True)
+    except Exception:
+        fig.tight_layout()
     if savepath:
         _savefig(fig, savepath)
     else:
@@ -932,7 +1085,12 @@ def main(argv=None):
         fig2_path = os.path.join(
             args.figdir, f"fig2_symmetry_vs_performance{suffix}.png"
         )
-        fig2_symmetry_vs_performance(cs, savepath=fig2_path, fontsize=args.fontsize)
+        fig2_symmetry_vs_performance(
+            condition_df=cs,
+            run_level_df=rl,
+            savepath=fig2_path,
+            fontsize=args.fontsize,
+        )
     if want(3):
         cond_for_fig3 = cond_roots[0] if cond_roots else args.agg_dir
         fig3_path = os.path.join(args.figdir, f"fig3_traveling_and_polar{suffix}.png")

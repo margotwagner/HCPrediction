@@ -515,27 +515,28 @@ def fig1_training_dynamics(
         legend=True,
     )
 
-    fig.tight_layout()
     if savepath:
-        _savefig(fig, savepath)
+        _savefig(fig, savepath, constrain=False)
     else:
         plt.show()
 
 
-def fig2_performance_triptych(condition_df, savepath=None, fontsize=12):
+def fig2_performance_sixpanel(condition_df, savepath=None, fontsize=12):
     """
-    Figure 2 (1x3):
-      A: Best training loss (↓) vs α0       ['best_loss']
-      B: Best open-loop MSE (↓) vs α0       ['mse_open']
-      C: Best closed-loop MSE (↓) vs α0     ['mse_free_closed']
-    Legends are placed outside (to the right) of each panel.
+    Figure 2 (2x3):
+      A: Best training loss (↓) vs α0           ['best_loss']
+      B: Best open-loop MSE (↓) vs α0           ['mse_open']
+      C: Best closed-loop MSE (↓) vs α0         ['mse_free_closed']  # label as "mse_free"
+      D: Prediction MSE (↓) vs α0               ['mse_prediction']
+      E: Replay MSE (↓) vs α0                   ['mse_replay']
+      F: Replay ring R^2 (↑) vs α0              ['ring_decode_R2_replay']
     """
     import matplotlib.pyplot as plt
 
     if condition_df is None or not {"condition_id", "metric", "mean"}.issubset(
         condition_df.columns
     ):
-        print("[SKIP] fig2_performance_triptych: condition_summary missing columns.")
+        print("[SKIP] fig2_performance_sixpanel: condition_summary missing columns.")
         return
 
     df = condition_df.copy()
@@ -543,7 +544,7 @@ def fig2_performance_triptych(condition_df, savepath=None, fontsize=12):
         lambda cid: os.path.basename(str(cid)).split("_")[0]
     )
 
-    def _wide_for_family(fam_df, col):
+    def _wide_for_family(fam_df):
         csw_mean = _cs_to_wide(fam_df, value_col="mean")
         csw_std = _cs_to_wide(fam_df, value_col="std")
         if csw_mean is None:
@@ -559,100 +560,68 @@ def fig2_performance_triptych(condition_df, savepath=None, fontsize=12):
             )
         return csw_mean, csw_std
 
-    fig, (axA, axB, axC) = plt.subplots(1, 3, figsize=(15, 5))
+    def _plot_metric(ax, fam_df, metric, ylabel, title):
+        families = sorted(fam_df["shortname"].unique().tolist())
+        plotted_any = False
+        for fam in families:
+            sub = fam_df[fam_df["shortname"] == fam]
+            mW, sW = _wide_for_family(sub)
+            if mW is None or metric not in mW.columns:
+                continue
+            x = mW["alpha"].values
+            y = mW[metric].values
+            if sW is not None and metric in sW.columns:
+                yerr = (
+                    sW.set_index("condition_id")[metric]
+                    .reindex(mW["condition_id"])
+                    .values
+                )
+                ax.errorbar(
+                    x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
+                )
+            else:
+                ax.plot(x, y, "-o", linewidth=1.6, label=fam)
+            plotted_any = True
+        _style(ax, fontsize, title=title, xlabel=r"$\alpha_0$", ylabel=ylabel)
+        if plotted_any:
+            ax.legend(frameon=False, fontsize=max(8, fontsize - 2), loc="best")
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No data",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=fontsize - 1,
+            )
+
+    # Layout
+    fig, axs = plt.subplots(2, 3, figsize=(16, 9))
+    (axA, axB, axC), (axD, axE, axF) = axs
     plt.rcParams.update({"font.size": fontsize})
 
-    families = sorted(df["shortname"].unique().tolist())
-    plotted = {"A": False, "B": False, "C": False}
-
-    for fam in families:
-        sub = df[df["shortname"] == fam]
-        # A: best_loss
-        mA, sA = _wide_for_family(sub, "best_loss")
-        if mA is not None and "best_loss" in mA.columns:
-            x = mA["alpha"].values
-            y = mA["best_loss"].values
-            if sA is not None and "best_loss" in sA.columns:
-                yerr = (
-                    sA.set_index("condition_id")["best_loss"]
-                    .reindex(mA["condition_id"])
-                    .values
-                )
-                axA.errorbar(
-                    x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
-                )
-            else:
-                axA.plot(x, y, "-o", linewidth=1.6, label=fam)
-            plotted["A"] = True
-
-        # B: mse_open
-        mB, sB = _wide_for_family(sub, "mse_open")
-        if mB is not None and "mse_open" in mB.columns:
-            x = mB["alpha"].values
-            y = mB["mse_open"].values
-            if sB is not None and "mse_open" in sB.columns:
-                yerr = (
-                    sB.set_index("condition_id")["mse_open"]
-                    .reindex(mB["condition_id"])
-                    .values
-                )
-                axB.errorbar(
-                    x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
-                )
-            else:
-                axB.plot(x, y, "-o", linewidth=1.6, label=fam)
-            plotted["B"] = True
-
-        # C: mse_free_closed
-        mC, sC = _wide_for_family(sub, "mse_free_closed")
-        if mC is not None and "mse_free_closed" in mC.columns:
-            x = mC["alpha"].values
-            y = mC["mse_free_closed"].values
-            if sC is not None and "mse_free_closed" in sC.columns:
-                yerr = (
-                    sC.set_index("condition_id")["mse_free_closed"]
-                    .reindex(mC["condition_id"])
-                    .values
-                )
-                axC.errorbar(
-                    x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
-                )
-            else:
-                axC.plot(x, y, "-o", linewidth=1.6, label=fam)
-            plotted["C"] = True
-
-    # Styling
-    _style(
-        axA,
-        fontsize,
-        title="A — Best training loss (↓) vs α₀",
-        xlabel=r"$\alpha_0$",
-        ylabel="best_loss",
+    # Panels
+    _plot_metric(axA, df, "best_loss", "best_loss", "A — Best training loss (↓) vs α₀")
+    _plot_metric(axB, df, "mse_open", "mse_open", "B — Best open-loop MSE (↓) vs α₀")
+    _plot_metric(
+        axC, df, "mse_free_closed", "mse_free", "C — Best closed-loop MSE (↓) vs α₀"
     )
-    _style(
-        axB,
-        fontsize,
-        title="B — Best open-loop MSE (↓) vs α₀",
-        xlabel=r"$\alpha_0$",
-        ylabel="mse_open",
+    _plot_metric(
+        axD, df, "mse_prediction", "mse_prediction", "D — Prediction MSE (↓) vs α₀"
     )
-    _style(
-        axC,
-        fontsize,
-        title="C — Best closed-loop MSE (↓) vs α₀",
-        xlabel=r"$\alpha_0$",
-        ylabel="mse_free_closed",
+    _plot_metric(axE, df, "mse_replay", "mse_replay", "E — Replay MSE (↓) vs α₀")
+    _plot_metric(
+        axF,
+        df,
+        "ring_decode_R2_replay",
+        "ring_decode_R2_replay",
+        "F — Replay ring $R^2$ (↑) vs α₀",
     )
 
-    # Legends
-    if plotted["A"]:
-        axA.legend(frameon=False, fontsize=max(8, fontsize - 2), loc="best")
-    if plotted["B"]:
-        axB.legend(frameon=False, fontsize=max(8, fontsize - 2), loc="best")
-    if plotted["C"]:
-        axC.legend(frameon=False, fontsize=max(8, fontsize - 2), loc="best")
-
-    fig.suptitle("Performance vs Initial Mixing Ratio (α₀)", fontsize=fontsize + 2)
+    fig.suptitle(
+        "Performance vs Initial Mixing Ratio (α₀) — 6 metrics", fontsize=fontsize + 2
+    )
 
     if savepath:
         _savefig(fig, savepath, constrain=False)
@@ -850,7 +819,7 @@ def fig4_traveling_waves_and_replay(
         try:
             print("[fig4] ls:", os.listdir(str(cond)))
         except Exception as e:
-            print("[fig3] cannot list dir:", e)
+            print("[fig4] cannot list dir:", e)
         print(f"[SKIP] fig4: no run_level.csv in {cond}")
         return
 
@@ -865,12 +834,15 @@ def fig4_traveling_waves_and_replay(
 
     def _pick_best_row(frame: pd.DataFrame):
         # Prefer highest replay metric if present; else lowest mse_open; else lowest final_loss
-        if "replay_r2" in frame.columns and not frame["replay_r2"].isna().all():
-            return frame.sort_values("replay_r2", ascending=False).head(1)
+        if (
+            "replay_r2_replay" in frame.columns
+            and not frame["replay_r2_replay"].isna().all()
+        ):
+            return frame.sort_values("replay_r2_replay", ascending=False).head(1)
         key = (
             "mse_open"
             if "mse_open" in frame.columns
-            else ("final_loss" if "final_loss" in frame.columns else None)
+            else ("last_loss" if "last_loss" in frame.columns else None)
         )
         if key is None or frame[key].isna().all():
             return frame.head(1)
@@ -1038,7 +1010,7 @@ def fig4_traveling_waves_and_replay(
     any_line = False
     if _plot_polar_angles(axC, rp_ang, "Replay θ̂(t)", "-") is not None:
         any_line = True
-    if _plot_polar_angles(axC, pr_ang, "Prediction θ̂(t)", "-.") is not None:
+    if _plot_polar_angles(axC, pr_ang, "Prediction θ̂(t)", "-") is not None:
         any_line = True
 
     if any_line:
@@ -1056,18 +1028,17 @@ def fig4_traveling_waves_and_replay(
     axD.axis("off")
     prefer_metrics = [
         # REPLAY
-        "replay_r2",
+        "replay_r2_replay",
         "ring_decode_R2_replay",
         "angle_error_R_replay",
-        "phase_drift_per_step_replay",
-        "time_to_divergence_replay",
         "residual_lag1_autocorr_replay",
         # PREDICTION
-        "ring_decode_R2",
-        "mse",
-        "angle_error_R",
-        "mean_corr",
-        "time_to_divergence",
+        "mse_prediction",
+        "ring_decode_R2_prediction",
+        "angle_error_R_prediction",
+        "mean_corr_prediction",
+        "time_to_divergence_prediction",
+        "phase_drift_per_step_prediction",
     ]
     # Filter to this condition where possible
     cs_sub = condition_summary_df
@@ -1083,8 +1054,9 @@ def fig4_traveling_waves_and_replay(
     else:
         axD.set_title("D — Replay & Prediction Metrics (mean±std)", fontsize=fontsize)
         tbl = axD.table(
-            cellText=table_df.values, colLabels=table_df.columns, loc="center"
+            cellText=table_df.values, colLabels=["metric", cond.name], loc="center"
         )
+
         tbl.auto_set_font_size(False)
         tbl.set_fontsize(max(7, fontsize - 5))
         tbl.scale(1.0, 1.2)
@@ -1097,19 +1069,15 @@ def fig4_traveling_waves_and_replay(
         f"Fig 4 — Waves & Polar (cond: {cond.name}, run: {run_id})",
         fontsize=fontsize + 2,
     )
-    try:
-        fig.set_constrained_layout(True)
-    except Exception:
-        fig.tight_layout()
     if savepath:
-        _savefig(fig, savepath)
+        _savefig(fig, savepath, constrain=False)
     else:
         plt.show()
     return fig
 
 
 # ==============================
-# Figure 4 helpers (checkpoints + cache + heatmap permutation)
+# Figure 5 helpers (checkpoints + cache + heatmap permutation)
 # ==============================
 
 
@@ -1132,7 +1100,7 @@ def _load_W_history_from_ckpt(ckpt_path: str):
 
         ckpt = torch.load(ckpt_path, map_location="cpu")
     except Exception as e:
-        print(f"[SKIP] fig4: failed to load ckpt {ckpt_path}: {e}")
+        print(f"[SKIP] fig5: failed to load ckpt {ckpt_path}: {e}")
         return None, None
     weights = ckpt.get("weights", {})
     hist = weights.get("W_hh_history", None)
@@ -1219,7 +1187,7 @@ def _get_or_make_perm(run_dir: str):
     H = _load_hidden_for_perm(run_dir)
     if H is None:
         print(
-            f"[WARN] fig4: no hidden traces found to compute permutation in {run_dir}; leaving W unsorted."
+            f"[WARN] fig5: no hidden traces found to compute permutation in {run_dir}; leaving W unsorted."
         )
         return None
     perm = _peak_time_sort_perm(H)
@@ -1249,7 +1217,7 @@ def _find_or_make_sorted_W_snapshot(run_dir: str, epoch_val: int):
 
     ckpts = _list_checkpoints(run_dir)
     if not ckpts:
-        print(f"[SKIP] fig4: no checkpoints in {run_dir}")
+        print(f"[SKIP] fifig54: no checkpoints in {run_dir}")
         return None
     epochs, Ws = None, None
     for c in reversed(ckpts):  # latest first
@@ -1257,7 +1225,7 @@ def _find_or_make_sorted_W_snapshot(run_dir: str, epoch_val: int):
         if epochs is not None:
             break
     if epochs is None:
-        print(f"[SKIP] fig4: no W_hh_history in checkpoints for {run_dir}")
+        print(f"[SKIP] fig5: no W_hh_history in checkpoints for {run_dir}")
         return None
 
     arr = np.asarray(epochs, dtype=float)
@@ -1269,7 +1237,7 @@ def _find_or_make_sorted_W_snapshot(run_dir: str, epoch_val: int):
     try:
         np.save(fout, W_sorted)
     except Exception as e:
-        print(f"[WARN] fig4: failed to cache {fout}: {e}")
+        print(f"[WARN] fig5: failed to cache {fout}: {e}")
     return fout
 
 
@@ -1489,13 +1457,13 @@ def parse_args(argv=None):
         "--vmin",
         type=float,
         default=None,
-        help="Minimum value for color scale in Figure 3 heatmaps",
+        help="Minimum value for color scale in Figure 4 heatmaps",
     )
     p.add_argument(
         "--vmax",
         type=float,
         default=None,
-        help="Maximum value for color scale in Figure 3 heatmaps",
+        help="Maximum value for color scale in Figure 4 heatmaps",
     )
     p.add_argument(
         "--fig5_time",
@@ -1564,8 +1532,10 @@ def main(argv=None):
         )
 
     if want(2):
-        fig2_path = os.path.join(args.figdir, f"fig2_performance_vs_alpha{suffix}.png")
-        fig2_performance_triptych(
+        fig2_path = os.path.join(
+            args.figdir, f"fig2_performance_vs_alpha_6panel{suffix}.png"
+        )
+        fig2_performance_sixpanel(
             condition_df=cs,
             savepath=fig2_path,
             fontsize=args.fontsize,

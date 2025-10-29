@@ -313,12 +313,15 @@ def _style(ax, fontsize=12, title=None, xlabel=None, ylabel=None, legend=False):
                 l.set_linewidth(2.0)
 
 
-def _savefig(fig, path):
+def _savefig(fig, path, constrain=True):
     _ensure_dir(os.path.dirname(path))
     # Use constrained layout if available
-    try:
-        fig.set_constrained_layout(True)
-    except Exception:
+    if constrain:
+        try:
+            fig.set_constrained_layout(True)
+        except Exception:
+            fig.tight_layout()
+    else:
         fig.tight_layout()
     fig.savefig(path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -519,416 +522,111 @@ def fig1_training_dynamics(
         plt.show()
 
 
-# --------------------------------------------
-# Figure 2 – Accuracy panels (eval metrics)
-# --------------------------------------------
-
-
-def fig2_symmetry_vs_performance(
-    condition_df, run_level_df, savepath=None, fontsize=12
-):
+def fig2_performance_triptych(condition_df, savepath=None, fontsize=12):
     """
-    Figure 2 (2x2):
-      A: Best training loss (↓) vs α0            [condition_summary: 'best_loss']
-      B: Best open-loop MSE (↓) vs α0            [condition_summary: 'mse_open']
-      C: Best closed-loop MSE (↓) vs α0          [condition_summary: 'mse_free_closed' (preferred)]
-      D: alpha(t) over training (median ± IQR)   [run_level.csv: fro_S_offline,fro_A_offline]
+    Figure 2 (1x3):
+      A: Best training loss (↓) vs α0       ['best_loss']
+      B: Best open-loop MSE (↓) vs α0       ['mse_open']
+      C: Best closed-loop MSE (↓) vs α0     ['mse_free_closed']
+    Legends are placed outside (to the right) of each panel.
     """
-    # -------------------------
-    # Prepare Figure + axes
-    # -------------------------
-    fig, axs = plt.subplots(2, 2, figsize=(12, 7.5))
-    (axA, axB), (axC, axD) = axs
+    import matplotlib.pyplot as plt
 
-    # Capture family→color chosen by MPL in A–C so D reuses them
-    FAMILY_COLOR = {}  # e.g., {"shift": "#1f77b4", ...}
-    FAMILY_ORDER = []  # keep insertion order for a stable color legend
-
-    def _record_color_from_line(fam: str, line_obj):
-        if fam not in FAMILY_COLOR and line_obj is not None:
-            c = getattr(line_obj, "get_color", lambda: None)()
-            if c:
-                FAMILY_COLOR[fam] = c
-                FAMILY_ORDER.append(fam)
-
-    # -------------------------
-    # Panels A, B, C  — condition_summary
-    # -------------------------
     if condition_df is None or not {"condition_id", "metric", "mean"}.issubset(
         condition_df.columns
     ):
-        print(
-            "[SKIP] fig2 A–C: condition_summary missing columns 'condition_id','metric','mean'"
-        )
-        for ax in (axA, axB, axC):
-            ax.axis("off")
-    else:
-        df = condition_df.copy()
-        df["shortname"] = df["condition_id"].apply(
-            lambda cid: os.path.basename(str(cid)).split("_")[0]
-        )
-        families = sorted(df["shortname"].unique().tolist())
-        single_family = families[0] if len(families) == 1 else None
+        print("[SKIP] fig2_performance_triptych: condition_summary missing columns.")
+        return
 
-        plotted_any = {"A": False, "B": False, "C": False}
-        for fam in families:
-            sub = df[df["shortname"] == fam]
-            csw_mean = _cs_to_wide(sub, value_col="mean")
-            csw_std = _cs_to_wide(sub, value_col="std")
-            if csw_mean is None or csw_mean.empty:
-                continue
+    df = condition_df.copy()
+    df["shortname"] = df["condition_id"].apply(
+        lambda cid: os.path.basename(str(cid)).split("_")[0]
+    )
 
-            # alpha0 from condition_id
-            csw_mean["alpha"] = csw_mean["condition_id"].apply(_alpha_from_condition_id)
-            csw_mean = csw_mean.dropna(subset=["alpha"]).sort_values("alpha")
-            if csw_std is not None and "condition_id" in csw_std.columns:
-                csw_std["alpha"] = csw_std["condition_id"].apply(
-                    _alpha_from_condition_id
+    def _wide_for_family(fam_df, col):
+        csw_mean = _cs_to_wide(fam_df, value_col="mean")
+        csw_std = _cs_to_wide(fam_df, value_col="std")
+        if csw_mean is None:
+            return None, None
+        csw_mean["alpha"] = csw_mean["condition_id"].apply(_alpha_from_condition_id)
+        csw_mean = csw_mean.dropna(subset=["alpha"]).sort_values("alpha")
+        if csw_std is not None and "condition_id" in csw_std.columns:
+            csw_std["alpha"] = csw_std["condition_id"].apply(_alpha_from_condition_id)
+            csw_std = (
+                csw_std.set_index("condition_id")
+                .reindex(csw_mean["condition_id"])
+                .reset_index()
+            )
+        return csw_mean, csw_std
+
+    fig, (axA, axB, axC) = plt.subplots(1, 3, figsize=(15, 5))
+    plt.rcParams.update({"font.size": fontsize})
+
+    families = sorted(df["shortname"].unique().tolist())
+    plotted = {"A": False, "B": False, "C": False}
+
+    for fam in families:
+        sub = df[df["shortname"] == fam]
+        # A: best_loss
+        mA, sA = _wide_for_family(sub, "best_loss")
+        if mA is not None and "best_loss" in mA.columns:
+            x = mA["alpha"].values
+            y = mA["best_loss"].values
+            if sA is not None and "best_loss" in sA.columns:
+                yerr = (
+                    sA.set_index("condition_id")["best_loss"]
+                    .reindex(mA["condition_id"])
+                    .values
                 )
-                csw_std = (
-                    csw_std.set_index("condition_id")
-                    .reindex(csw_mean["condition_id"])
-                    .reset_index()
-                )
-
-            # Panel A: best_loss vs alpha0
-            if "best_loss" in csw_mean.columns:
-                x = csw_mean["alpha"].values
-                y = csw_mean["best_loss"].values
-                if fam in FAMILY_COLOR:
-                    color = FAMILY_COLOR[fam]
-                    if csw_std is not None and "best_loss" in csw_std.columns:
-                        yerr = (
-                            csw_std.set_index("condition_id")["best_loss"]
-                            .reindex(csw_mean["condition_id"])
-                            .values
-                        )
-                        cont = axA.errorbar(
-                            x,
-                            y,
-                            yerr=yerr,
-                            fmt="-o",
-                            capsize=3,
-                            linewidth=1.6,
-                            color=color,
-                            ecolor=color,
-                            label=fam,
-                        )
-                        _record_color_from_line(
-                            fam,
-                            cont.lines[0]
-                            if hasattr(cont, "lines") and cont.lines
-                            else None,
-                        )
-                    else:
-                        (line,) = axA.plot(
-                            x, y, "-o", linewidth=1.6, color=color, label=fam
-                        )
-                        _record_color_from_line(fam, line)
-                else:
-                    # let MPL pick color, then record it
-                    if csw_std is not None and "best_loss" in csw_std.columns:
-                        yerr = (
-                            csw_std.set_index("condition_id")["best_loss"]
-                            .reindex(csw_mean["condition_id"])
-                            .values
-                        )
-                        cont = axA.errorbar(
-                            x,
-                            y,
-                            yerr=yerr,
-                            fmt="-o",
-                            capsize=3,
-                            linewidth=1.6,
-                            label=fam,
-                        )
-                        _record_color_from_line(
-                            fam,
-                            cont.lines[0]
-                            if hasattr(cont, "lines") and cont.lines
-                            else None,
-                        )
-                    else:
-                        (line,) = axA.plot(x, y, "-o", linewidth=1.6, label=fam)
-                        _record_color_from_line(fam, line)
-                plotted_any["A"] = True
-            else:
-                axA.axis("off")
-
-            # Panel B: mse_open vs alpha0
-            if "mse_open" in csw_mean.columns:
-                x = csw_mean["alpha"].values
-                y = csw_mean["mse_open"].values
-                color = FAMILY_COLOR.get(fam, None)
-                if csw_std is not None and "mse_open" in csw_std.columns:
-                    yerr = (
-                        csw_std.set_index("condition_id")["mse_open"]
-                        .reindex(csw_mean["condition_id"])
-                        .values
-                    )
-                    cont = (
-                        axB.errorbar(
-                            x,
-                            y,
-                            yerr=yerr,
-                            fmt="-o",
-                            capsize=3,
-                            linewidth=1.6,
-                            color=color,
-                            ecolor=color,
-                            label=fam,
-                        )
-                        if color
-                        else axB.errorbar(
-                            x,
-                            y,
-                            yerr=yerr,
-                            fmt="-o",
-                            capsize=3,
-                            linewidth=1.6,
-                            label=fam,
-                        )
-                    )
-                    _record_color_from_line(
-                        fam,
-                        cont.lines[0]
-                        if hasattr(cont, "lines") and cont.lines
-                        else None,
-                    )
-                else:
-                    (line,) = (
-                        axB.plot(x, y, "-o", linewidth=1.6, color=color, label=fam)
-                        if color
-                        else axB.plot(x, y, "-o", linewidth=1.6, label=fam)
-                    )
-                    _record_color_from_line(fam, line)
-                plotted_any["B"] = True
-            else:
-                axB.axis("off")
-
-            # Panel C: CLOSED — strict 'mse_free_closed'
-            if "mse_free_closed" in csw_mean.columns:
-                x = csw_mean["alpha"].values
-                y = csw_mean["mse_free_closed"].values
-                color = FAMILY_COLOR.get(fam, None)
-                if csw_std is not None and "mse_free_closed" in csw_std.columns:
-                    yerr = (
-                        csw_std.set_index("condition_id")["mse_free_closed"]
-                        .reindex(csw_mean["condition_id"])
-                        .values
-                    )
-                    cont = (
-                        axC.errorbar(
-                            x,
-                            y,
-                            yerr=yerr,
-                            fmt="-o",
-                            capsize=3,
-                            linewidth=1.6,
-                            color=color,
-                            ecolor=color,
-                            label=fam,
-                        )
-                        if color
-                        else axC.errorbar(
-                            x,
-                            y,
-                            yerr=yerr,
-                            fmt="-o",
-                            capsize=3,
-                            linewidth=1.6,
-                            label=fam,
-                        )
-                    )
-                    _record_color_from_line(
-                        fam,
-                        cont.lines[0]
-                        if hasattr(cont, "lines") and cont.lines
-                        else None,
-                    )
-                else:
-                    (line,) = (
-                        axC.plot(x, y, "-o", linewidth=1.6, color=color, label=fam)
-                        if color
-                        else axC.plot(x, y, "-o", linewidth=1.6, label=fam)
-                    )
-                    _record_color_from_line(fam, line)
-                plotted_any["C"] = True
-            else:
-                # Strict behavior: do not substitute any other column
-                if not getattr(fig, "_printed_missing_mse_free_closed", False):
-                    print(
-                        "[SKIP] fig2C: column 'mse_free_closed' not found in condition_summary; skipping Panel C."
-                    )
-                    setattr(fig, "_printed_missing_mse_free_closed", True)
-                axC.axis("off")
-
-        # legends if anything plotted
-        for ax_key, ax in zip(("A", "B", "C"), (axA, axB, axC)):
-            if plotted_any[ax_key]:
-                ax.legend(frameon=False, fontsize=max(8, fontsize - 2))
-
-        if any(plotted_any.values()):
-            if single_family:
-                fig.suptitle(
-                    f"Figure 2 — Performance vs α₀ (condition: {single_family})",
-                    fontsize=fontsize + 2,
-                )
-                fig.subplots_adjust(top=0.90)
-            else:
-                fig.suptitle("Figure 2 — Performance vs α₀", fontsize=fontsize + 2)
-                fig.subplots_adjust(top=0.90)
-
-    # -------------------------
-    # Panel D — alpha(t) from run_level.csv (reuse A–C colors; α0 -> linestyle)
-    # -------------------------
-    if run_level_df is None or run_level_df.empty:
-        axD.axis("off")
-        axD.set_title("D — alpha(t): no run_level.csv", fontsize=fontsize)
-    else:
-        df_rl = run_level_df.copy()
-        if "condition_id" not in df_rl.columns:
-            if "condition_root" in df_rl.columns:
-                df_rl["condition_id"] = df_rl["condition_root"].apply(
-                    _infer_condition_id_from_root
+                axA.errorbar(
+                    x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
                 )
             else:
-                df_rl["condition_id"] = "condition"
+                axA.plot(x, y, "-o", linewidth=1.6, label=fam)
+            plotted["A"] = True
 
-        have_cols = {"fro_S_offline", "fro_A_offline"} <= set(df_rl.columns)
-        tcol = _pick_time_col_runlevel(df_rl) if have_cols else None
-
-        if not have_cols or tcol is None:
-            axD.axis("off")
-            axD.set_title(
-                "D — alpha(t): missing fro_S_offline/fro_A_offline or time",
-                fontsize=fontsize,
-            )
-        else:
-            # derive family & alpha0 per condition (family must match A–C parsing logic)
-            df_rl["family"] = df_rl["condition_id"].apply(
-                lambda cid: os.path.basename(str(cid)).split("_")[0]
-            )
-            df_rl["alpha0"] = df_rl["condition_id"].apply(_alpha_from_condition_id)
-
-            # Build linestyle map from α0 levels present (stable)
-            ls_map, alpha_levels = _linestyle_map_for_alphas(df_rl["alpha0"].unique())
-
-            # thin per-run traces (color by family from A–C; linestyle by α0)
-            group_keys = ["condition_id"] + (
-                ["run_id"] if "run_id" in df_rl.columns else []
-            )
-            for _, g in df_rl.groupby(group_keys):
-                tcol_g, t, a = _alpha_series_from_runlevel(g)
-                if tcol_g is None:
-                    continue
-                order = np.argsort(t)
-                fam = g["family"].iloc[0]
-                a0 = (
-                    float(g["alpha0"].iloc[0])
-                    if pd.notna(g["alpha0"].iloc[0])
-                    else None
+        # B: mse_open
+        mB, sB = _wide_for_family(sub, "mse_open")
+        if mB is not None and "mse_open" in mB.columns:
+            x = mB["alpha"].values
+            y = mB["mse_open"].values
+            if sB is not None and "mse_open" in sB.columns:
+                yerr = (
+                    sB.set_index("condition_id")["mse_open"]
+                    .reindex(mB["condition_id"])
+                    .values
                 )
-                color = FAMILY_COLOR.get(fam, None) or "k"
-                lstyle = ls_map.get(a0, "-")
-                axD.plot(
-                    t[order],
-                    a[order],
-                    lw=1.0,
-                    alpha=0.30,
-                    color=color,
-                    linestyle=lstyle,
+                axB.errorbar(
+                    x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
                 )
+            else:
+                axB.plot(x, y, "-o", linewidth=1.6, label=fam)
+            plotted["B"] = True
 
-            # per-condition median + IQR (same color & linestyle)
-            for cond, cdf in df_rl.groupby("condition_id"):
-                fam = cdf["family"].iloc[0]
-                a0 = (
-                    float(cdf["alpha0"].iloc[0])
-                    if pd.notna(cdf["alpha0"].iloc[0])
-                    else None
+        # C: mse_free_closed
+        mC, sC = _wide_for_family(sub, "mse_free_closed")
+        if mC is not None and "mse_free_closed" in mC.columns:
+            x = mC["alpha"].values
+            y = mC["mse_free_closed"].values
+            if sC is not None and "mse_free_closed" in sC.columns:
+                yerr = (
+                    sC.set_index("condition_id")["mse_free_closed"]
+                    .reindex(mC["condition_id"])
+                    .values
                 )
-                color = FAMILY_COLOR.get(fam, None) or "k"
-                lstyle = ls_map.get(a0, "-")
-
-                tcol_c, _, _ = _alpha_series_from_runlevel(cdf)
-                if tcol_c is None:
-                    continue
-                xs = np.sort(
-                    pd.to_numeric(cdf[tcol_c], errors="coerce").dropna().unique()
+                axC.errorbar(
+                    x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
                 )
-                med, q1, q3 = [], [], []
-                for x in xs:
-                    sub = cdf[pd.to_numeric(cdf[tcol_c], errors="coerce") == x]
-                    _, _, aa = _alpha_series_from_runlevel(sub)
-                    aa = aa[np.isfinite(aa)]
-                    if aa.size == 0:
-                        med.append(np.nan)
-                        q1.append(np.nan)
-                        q3.append(np.nan)
-                    else:
-                        med.append(np.nanmedian(aa))
-                        q1.append(np.nanpercentile(aa, 25))
-                        q3.append(np.nanpercentile(aa, 75))
+            else:
+                axC.plot(x, y, "-o", linewidth=1.6, label=fam)
+            plotted["C"] = True
 
-                xs = xs.astype(float)
-                axD.plot(
-                    xs, med, lw=2.2, color=color, linestyle=lstyle, label=str(cond)
-                )
-                axD.fill_between(xs, q1, q3, alpha=0.12, color=color)
-
-            _style(
-                axD,
-                fontsize,
-                title="D — alpha(t) from run_level",
-                xlabel="epoch",
-                ylabel=r"alpha(t) = $\|S\|_F / (\|S\|_F + \|A\|_F)$",
-            )
-
-            # Compact dual legend: colors = families (from A–C); styles = α0 levels
-
-            fams_present = [f for f in FAMILY_ORDER if f in FAMILY_COLOR] or sorted(
-                df_rl["family"].dropna().unique()
-            )
-            color_handles = [
-                Line2D([0], [0], color=FAMILY_COLOR.get(f, "k"), lw=2.6, label=f)
-                for f in fams_present
-            ]
-            style_handles = [
-                Line2D(
-                    [0],
-                    [0],
-                    color="k",
-                    lw=2.6,
-                    linestyle=ls_map[a],
-                    label=f"α₀={a:.2f}",
-                )
-                for a in alpha_levels
-            ]
-
-            leg1 = axD.legend(
-                handles=color_handles,
-                title="Init type",
-                frameon=False,
-                fontsize=max(7, fontsize - 4),
-                title_fontsize=max(8, fontsize - 3),
-                loc="upper left",
-            )
-            axD.add_artist(leg1)
-            axD.legend(
-                handles=style_handles,
-                title="α₀ line style",
-                frameon=False,
-                fontsize=max(7, fontsize - 4),
-                title_fontsize=max(8, fontsize - 3),
-                loc="lower left",
-            )
-    # Add this right after the legends for A/B/C, before Panel D starts
+    # Styling
     _style(
         axA,
         fontsize,
         title="A — Best training loss (↓) vs α₀",
-        xlabel=r"$\alpha_0$ (symmetry at $t=0$)",
+        xlabel=r"$\alpha_0$",
         ylabel="best_loss",
     )
     _style(
@@ -941,28 +639,182 @@ def fig2_symmetry_vs_performance(
     _style(
         axC,
         fontsize,
-        title="C — Best closed-loop MSE (↓) vs α₀ [mse_free_closed]",
+        title="C — Best closed-loop MSE (↓) vs α₀",
         xlabel=r"$\alpha_0$",
         ylabel="mse_free_closed",
     )
 
-    # Layout & save
-    try:
-        fig.set_constrained_layout(True)
-    except Exception:
-        fig.tight_layout()
+    # Legends
+    if plotted["A"]:
+        axA.legend(frameon=False, fontsize=max(8, fontsize - 2), loc="best")
+    if plotted["B"]:
+        axB.legend(frameon=False, fontsize=max(8, fontsize - 2), loc="best")
+    if plotted["C"]:
+        axC.legend(frameon=False, fontsize=max(8, fontsize - 2), loc="best")
+
+    fig.suptitle("Performance vs Initial Mixing Ratio (α₀)", fontsize=fontsize + 2)
+
     if savepath:
-        _savefig(fig, savepath)
+        _savefig(fig, savepath, constrain=False)
+    else:
+        plt.show()
+
+
+def fig3_alpha_time_series(run_level_df, savepath=None, fontsize=12):
+    """
+    Figure 3:
+      α(t) over training (per-run thin lines; per-condition median±IQR)
+    Color/linestyle are initialized here (no dependency on Figure 2’s colors).
+    Legends are placed outside (to the right).
+    """
+    import matplotlib.pyplot as plt
+
+    if run_level_df is None or run_level_df.empty:
+        print("[SKIP] fig3_alpha_time_series: no run_level.csv available")
+        return
+
+    df_rl = run_level_df.copy()
+    if "condition_id" not in df_rl.columns:
+        if "condition_root" in df_rl.columns:
+            df_rl["condition_id"] = df_rl["condition_root"].apply(
+                _infer_condition_id_from_root
+            )
+        else:
+            df_rl["condition_id"] = "condition"
+
+    have_cols = {"fro_S_offline", "fro_A_offline"} <= set(df_rl.columns)
+    tcol = _pick_time_col_runlevel(df_rl) if have_cols else None
+    if not have_cols or tcol is None:
+        print(
+            "[SKIP] fig3_alpha_time_series: missing fro_S_offline/fro_A_offline or time col"
+        )
+        return
+
+    # Own parsing (independent of Fig 2)
+    df_rl["family"] = df_rl["condition_id"].apply(
+        lambda cid: os.path.basename(str(cid)).split("_")[0]
+    )
+    df_rl["alpha0"] = df_rl["condition_id"].apply(_alpha_from_condition_id)
+
+    # Distinct line styles by α0 present
+    ls_map, alpha_levels = _linestyle_map_for_alphas(df_rl["alpha0"].unique())
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.5, 4.8))
+    plt.rcParams.update({"font.size": fontsize})
+
+    # Use Matplotlib's default color cycle, assign per family (first-seen order)
+    default_colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    families_in_order = list(dict.fromkeys(df_rl["family"].tolist()))
+    fam_color = {
+        fam: default_colors[i % len(default_colors)]
+        for i, fam in enumerate(families_in_order)
+    }
+
+    # Per-run thin traces
+    for _, g in df_rl.groupby(
+        ["condition_id"] + (["run_id"] if "run_id" in df_rl.columns else [])
+    ):
+        tcol_g, t, a = _alpha_series_from_runlevel(g)
+        if tcol_g is None:
+            continue
+        order = np.argsort(t)
+        fam = g["family"].iloc[0]
+        a0 = float(g["alpha0"].iloc[0]) if pd.notna(g["alpha0"].iloc[0]) else None
+        # Let MPL choose colors per family via label
+        ax.plot(
+            t[order],
+            a[order],
+            lw=1.0,
+            alpha=0.30,
+            linestyle=ls_map.get(a0, "-"),
+            color=fam_color.get(fam, None),  # default cycle color per family
+            label=fam,
+        )
+
+    # Collapse labels to unique families (avoid duplicates)
+    handles, labels = ax.get_legend_handles_labels()
+    uniq = {}
+    for h, l in zip(handles, labels):
+        if l not in uniq:
+            uniq[l] = h
+    # Replace legend with unique family colors (outside)
+    leg_colors = ax.legend(
+        uniq.values(),
+        uniq.keys(),
+        title="Init type",
+        frameon=False,
+        fontsize=max(8, fontsize - 3),
+        title_fontsize=max(9, fontsize - 2),
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+    )
+    # Make legend swatches opaque (not the light per-run alpha)
+    for lh in leg_colors.legendHandles:
+        lh.set_alpha(1.0)
+
+    for cond, cdf in df_rl.groupby("condition_id"):
+        fam = cdf["family"].iloc[0]
+        a0 = float(cdf["alpha0"].iloc[0]) if pd.notna(cdf["alpha0"].iloc[0]) else None
+        color = fam_color.get(fam, None)
+        lstyle = ls_map.get(a0, "-")
+
+        xs = np.sort(
+            pd.to_numeric(cdf[tcol], errors="coerce").dropna().unique()
+        ).astype(float)
+        med, q1, q3 = [], [], []
+        for x in xs:
+            sub = cdf[pd.to_numeric(cdf[tcol], errors="coerce") == x]
+            _, _, aa = _alpha_series_from_runlevel(sub)
+            aa = aa[np.isfinite(aa)]
+            if aa.size == 0:
+                med.append(np.nan)
+                q1.append(np.nan)
+                q3.append(np.nan)
+            else:
+                med.append(np.nanmedian(aa))
+                q1.append(np.nanpercentile(aa, 25))
+                q3.append(np.nanpercentile(aa, 75))
+        ax.plot(xs, med, lw=2.2, color=color, linestyle=lstyle)
+        ax.fill_between(xs, q1, q3, alpha=0.12, color=color)
+
+    _style(
+        ax,
+        fontsize,
+        title="Figure 3 — α(t) from run_level",
+        xlabel="epoch",
+        ylabel=r"alpha(t) = $\|S\|_F / (\|S\|_F + \|A\|_F)$",
+    )
+
+    # Add α0-line-style key as a second legend, also outside on the right
+    from matplotlib.lines import Line2D
+
+    style_handles = [
+        Line2D([0], [0], color="k", lw=2.6, linestyle=ls_map[a], label=f"α₀={a:.2f}")
+        for a in alpha_levels
+    ]
+    ax.add_artist(leg_colors)
+    ax.legend(
+        handles=style_handles,
+        title="α₀ line style",
+        frameon=False,
+        fontsize=max(8, fontsize - 3),
+        title_fontsize=max(9, fontsize - 2),
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.10),
+    )
+
+    if savepath:
+        _savefig(fig, savepath, constrain=False)
     else:
         plt.show()
 
 
 # -----------------------------------------------------------
-# Figure 3 – Emergent traveling-waves and replay dynamics
+# Figure 4 – Emergent traveling-waves and replay dynamics
 # -----------------------------------------------------------
 
 
-def fig3_traveling_waves_and_replay(
+def fig4_traveling_waves_and_replay(
     condition_dir: str,
     run_level_df: Optional[pd.DataFrame],
     condition_summary_df: Optional[pd.DataFrame],
@@ -993,13 +845,13 @@ def fig3_traveling_waves_and_replay(
     candidates += list(cond.glob("*run_level*.csv"))
     rpath = next((p for p in candidates if p.exists()), None)
 
-    print("[fig3] condition_dir:", cond)
+    print("[fig4] condition_dir:", cond)
     if rpath is None:
         try:
-            print("[fig3] ls:", os.listdir(str(cond)))
+            print("[fig4] ls:", os.listdir(str(cond)))
         except Exception as e:
             print("[fig3] cannot list dir:", e)
-        print(f"[SKIP] fig3: no run_level.csv in {cond}")
+        print(f"[SKIP] fig4: no run_level.csv in {cond}")
         return
 
     # Anchor to the actual CSV parent to avoid path mismatches
@@ -1008,7 +860,7 @@ def fig3_traveling_waves_and_replay(
     # --- Read run_level.csv and pick a run (old inline logic, with robust fallbacks)
     df = pd.read_csv(str(rpath))
     if df.empty:
-        print(f"[SKIP] fig3: run_level.csv is empty in {cond}")
+        print(f"[SKIP] fig4: run_level.csv is empty in {cond}")
         return
 
     def _pick_best_row(frame: pd.DataFrame):
@@ -1026,12 +878,12 @@ def fig3_traveling_waves_and_replay(
 
     pick = _pick_best_row(df)
     if pick.empty or "run_id" not in pick.columns:
-        print(f"[SKIP] fig3: cannot identify run_id from run_level.csv")
+        print(f"[SKIP] fig4: cannot identify run_id from run_level.csv")
         return
     try:
         run_id = int(pick.iloc[0]["run_id"])
     except Exception:
-        print(f"[SKIP] fig3: invalid run_id value: {pick.iloc[0]['run_id']!r}")
+        print(f"[SKIP] fig4: invalid run_id value: {pick.iloc[0]['run_id']!r}")
         return
     run_id = int(pick.iloc[0]["run_id"])
 
@@ -1039,7 +891,7 @@ def fig3_traveling_waves_and_replay(
     run_dir = cond / f"run_{run_id:02d}"
     ckpts = list(run_dir.glob("*.pth.tar"))
     if not ckpts:
-        print(f"[SKIP] fig3: no checkpoint in {run_dir}")
+        print(f"[SKIP] fig4: no checkpoint in {run_dir}")
         return
     ckpt_path = str(ckpts[0])
     stub = (
@@ -1064,7 +916,7 @@ def fig3_traveling_waves_and_replay(
     pr_h = _load_hidden_if(stub + "_prediction_hidden.npy")
 
     if rp_h is None and pr_h is None:
-        print(f"[SKIP] fig3: no hidden traces in {run_dir}")
+        print(f"[SKIP] fig4: no hidden traces in {run_dir}")
         return
     if rp_h is not None and rp_h.shape[1] > max_units:
         rp_h = rp_h[:, :max_units]
@@ -1242,7 +1094,7 @@ def fig3_traveling_waves_and_replay(
                 cell.set_text_props(weight="bold")
 
     fig.suptitle(
-        f"Fig 3 — Waves & Polar (cond: {cond.name}, run: {run_id})",
+        f"Fig 4 — Waves & Polar (cond: {cond.name}, run: {run_id})",
         fontsize=fontsize + 2,
     )
     try:
@@ -1422,11 +1274,11 @@ def _find_or_make_sorted_W_snapshot(run_dir: str, epoch_val: int):
 
 
 # -----------------------------------------------------------
-# Figure 4 – Mean weight trace & eigenspectrum (per condition)
+# Figure 5 – Mean weight trace & eigenspectrum (per condition)
 # -----------------------------------------------------------
 
 
-def fig4_weights_and_spectrum_from_checkpoints(
+def fig5_weights_and_spectrum_from_checkpoints(
     condition_root: str,
     time_spec: str = "last",
     savepath: Optional[str] = None,
@@ -1440,7 +1292,7 @@ def fig4_weights_and_spectrum_from_checkpoints(
     """
     run_dirs = sorted(glob.glob(os.path.join(condition_root, "run_*")))
     if not run_dirs:
-        print("[SKIP] fig4: no run_* under", condition_root)
+        print("[SKIP] fig5: no run_* under", condition_root)
         return None
 
     # Discover epochs per run
@@ -1453,11 +1305,11 @@ def fig4_weights_and_spectrum_from_checkpoints(
             if epochs is not None:
                 break
         if epochs is None:
-            print(f"[SKIP] fig4: no W history in {rd}")
+            print(f"[SKIP] fig5: no W history in {rd}")
             continue
         per_run_epochs[rd] = list(epochs)
     if not per_run_epochs:
-        print("[SKIP] fig4: no runs with W history in", condition_root)
+        print("[SKIP] fig5: no runs with W history in", condition_root)
         return None
 
     # Choose row indices using the first run as reference for labeling
@@ -1465,7 +1317,7 @@ def fig4_weights_and_spectrum_from_checkpoints(
     row_idxs = _select_time_indices_generic(per_run_epochs[ref_run], time_spec)
     if not row_idxs:
         print(
-            "[SKIP] fig4: time_spec matched nothing; available:",
+            "[SKIP] fig5: time_spec matched nothing; available:",
             per_run_epochs[ref_run],
         )
         return None
@@ -1501,7 +1353,7 @@ def fig4_weights_and_spectrum_from_checkpoints(
                 continue
 
         if not Ws_sorted:
-            print(f"[SKIP] fig4 row {row_i}: no sorted Ws for epoch ~{epoch_label}")
+            print(f"[SKIP] fig5 row {row_i}: no sorted Ws for epoch ~{epoch_label}")
             axL.axis("off")
             axR.axis("off")
             continue
@@ -1646,10 +1498,10 @@ def parse_args(argv=None):
         help="Maximum value for color scale in Figure 3 heatmaps",
     )
     p.add_argument(
-        "--fig4_time",
+        "--fig5_time",
         type=str,
         default="last",
-        help="Figure 4 timepoint(s): first|middle|last|all or comma-list (e.g., 'first,last' or '100,500').",
+        help="Figure 5 timepoint(s): first|middle|last|all or comma-list (e.g., 'first,last' or '100,500').",
     )
 
     return p.parse_args(argv)
@@ -1710,44 +1562,50 @@ def main(argv=None):
             logxB=args.fig1_logxB,
             logyB=args.fig1_logyB,
         )
+
     if want(2):
-        fig2_path = os.path.join(
-            args.figdir, f"fig2_symmetry_vs_performance{suffix}.png"
-        )
-        fig2_symmetry_vs_performance(
+        fig2_path = os.path.join(args.figdir, f"fig2_performance_vs_alpha{suffix}.png")
+        fig2_performance_triptych(
             condition_df=cs,
-            run_level_df=rl,
             savepath=fig2_path,
             fontsize=args.fontsize,
         )
+
     if want(3):
+        fig3_path = os.path.join(args.figdir, f"fig3_alpha_time_series{suffix}.png")
+        fig3_alpha_time_series(
+            run_level_df=rl,
+            savepath=fig3_path,
+            fontsize=args.fontsize,
+        )
+    if want(4):
         roots = cond_roots if cond_roots else [args.agg_dir]
         for root in roots:
-            fig3_path = os.path.join(
-                args.figdir, f"fig3_{_short_label_from_root(root)}{suffix}.png"
+            fig4_path = os.path.join(
+                args.figdir, f"fig4_{_short_label_from_root(root)}{suffix}.png"
             )
-            fig3_traveling_waves_and_replay(
+            fig4_traveling_waves_and_replay(
                 condition_dir=root,
                 run_level_df=rl,
                 condition_summary_df=cs,
-                savepath=fig3_path,
+                savepath=fig4_path,
                 fontsize=args.fontsize,
                 max_units=100,
                 vmin=args.vmin,
                 vmax=args.vmax,
             )
-    if want(4):
+    if want(5):
         roots = cond_roots if cond_roots else [args.agg_dir]
         for root in roots:
             short = _short_label_from_root(root)  # e.g., identity_n100_fro
             per_suffix = f"_{args.figtag}_{short}" if args.figtag else f"_{short}"
-            fig4_path = os.path.join(
-                args.figdir, f"fig4_weights_and_spectrum{per_suffix}.png"
+            fig5_path = os.path.join(
+                args.figdir, f"fig5_weights_and_spectrum{per_suffix}.png"
             )
-            fig4_weights_and_spectrum_from_checkpoints(
+            fig5_weights_and_spectrum_from_checkpoints(
                 condition_root=root,
-                time_spec=args.fig4_time,
-                savepath=fig4_path,
+                time_spec=args.fig5_time,
+                savepath=fig5_path,
                 fontsize=args.fontsize,
             )
 

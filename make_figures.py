@@ -15,13 +15,8 @@ Inputs (flexible):
 Outputs:
 - PNGs saved to --figdir (default: ./figs)
 
-Usage (auto all):
-    python make_figures.py --agg_dir ./runs_agg --figdir ./figs --fontsize 12
-
 Notebook usage:
-    import make_figures as mf
-    rl, cs, off = mf.load_all(agg_dir="./runs_agg")
-    mf.fig_convergence_speed(cs, savepath="figs/fig1_convergence.png", fontsize=14)
+    TODO
     ...
 """
 
@@ -90,56 +85,6 @@ def _filter_df(df, condition_regex=None, run_regex=None):
     if run_regex and "run_id" in out.columns:
         out = out[out["run_id"].astype(str).str.contains(run_regex, regex=True)]
     return out
-
-
-def load_all(
-    agg_dir="./runs_agg",
-    run_level_csv=None,
-    condition_csv=None,
-    offline_csv=None,
-    eval_csv=None,
-):
-    """
-    Load aggregated CSVs, with fallbacks if paths are not provided.
-    Returns: (run_level_df, condition_df, offline_df)
-    """
-    if run_level_csv is None:
-        run_level_csv = _first_existing(
-            [os.path.join(agg_dir, "run_level.csv"), "run_level.csv"]
-        )
-    if condition_csv is None:
-        condition_csv = _first_existing(
-            [os.path.join(agg_dir, "condition_summary.csv"), "condition_summary.csv"]
-        )
-    if offline_csv is None:
-        offline_csv = _first_existing(
-            [os.path.join(agg_dir, "offline_all.csv"), "offline_all.csv"]
-        )
-
-    rl = _read_csv_safe(run_level_csv)
-    cs = _read_csv_safe(condition_csv)
-    off = _read_csv_safe(offline_csv)
-
-    # If offline_all missing, try discover per-run offline CSVs
-    if off is None:
-        cand = glob.glob(os.path.join(agg_dir, "**", "*offline*.csv"), recursive=True)
-        if cand:
-            frames = []
-            for c in cand:
-                df = _read_csv_safe(c)
-                if df is not None:
-                    frames.append(df)
-            if frames:
-                try:
-                    off = pd.concat(frames, sort=False, ignore_index=True)
-                except Exception:
-                    off = None
-
-    # If evaluation-level CSV exists and you want to merge/use it later, load it similarly.
-    # (Most of the time, eval metrics are already merged into run_level.csv by your aggregator.)
-    ev = _read_csv_safe(eval_csv) if eval_csv else None
-
-    return rl, cs, off, ev
 
 
 def _infer_condition_id_from_root(root):
@@ -1105,6 +1050,7 @@ def _load_W_history_from_ckpt(ckpt_path: str):
     weights = ckpt.get("weights", {})
     hist = weights.get("W_hh_history", None)
     epochs = ckpt.get("snapshot_epochs", None)
+
     if hist is None or epochs is None:
         return None, None
     Ws = []
@@ -1113,6 +1059,8 @@ def _load_W_history_from_ckpt(ckpt_path: str):
             w = w.detach().cpu().numpy()
         else:
             w = np.asarray(w)
+        if w.dtype == np.float16:
+            w = w.astype(np.float32, copy=False)
         if w.ndim == 2 and w.shape[0] == w.shape[1]:
             Ws.append(w)
     if not Ws:
@@ -1217,7 +1165,7 @@ def _find_or_make_sorted_W_snapshot(run_dir: str, epoch_val: int):
 
     ckpts = _list_checkpoints(run_dir)
     if not ckpts:
-        print(f"[SKIP] fifig54: no checkpoints in {run_dir}")
+        print(f"[SKIP] fig5: no checkpoints in {run_dir}")
         return None
     epochs, Ws = None, None
     for c in reversed(ckpts):  # latest first
@@ -1249,16 +1197,21 @@ def _find_or_make_sorted_W_snapshot(run_dir: str, epoch_val: int):
 def fig5_weights_and_spectrum_from_checkpoints(
     condition_root: str,
     time_spec: str = "last",
-    savepath: Optional[str] = None,
+    savepath: Optional[
+        str
+    ] = None,  # treated as a *base* path; we append suffixes per timepoint
     fontsize: int = 12,
 ):
     """
-    Rows = selected timepoints; Columns = [Trace mean±sd, Eigenspectrum].
-    Uses checkpoints as source of truth, applies SAME unit permutation as heatmaps
-    (peak-time on hidden activity), caches sorted W to analysis/weights/, and reuses cache.
-    Always overlays a faint eigenvalue cloud from individual runs.
+    One PNG per requested timepoint.
+    Each PNG has 3 columns: [W_sorted heatmap, Trace mean±sd, Eigenspectrum].
+    Uses checkpoints as source of truth, peak-time permutation, and cached Wsorted.
     """
-    run_dirs = sorted(glob.glob(os.path.join(condition_root, "run_*")))
+    run_dirs = [
+        d
+        for d in sorted(glob.glob(os.path.join(condition_root, "run_*")))
+        if os.path.isdir(d)
+    ]
     if not run_dirs:
         print("[SKIP] fig5: no run_* under", condition_root)
         return None
@@ -1272,7 +1225,7 @@ def fig5_weights_and_spectrum_from_checkpoints(
             epochs, Ws = _load_W_history_from_ckpt(c)
             if epochs is not None:
                 break
-        if epochs is None:
+        if not epochs:  # handles None or empty
             print(f"[SKIP] fig5: no W history in {rd}")
             continue
         per_run_epochs[rd] = list(epochs)
@@ -1280,28 +1233,65 @@ def fig5_weights_and_spectrum_from_checkpoints(
         print("[SKIP] fig5: no runs with W history in", condition_root)
         return None
 
-    # Choose row indices using the first run as reference for labeling
+    # Reference run for labeling
     ref_run = next(iter(per_run_epochs))
-    row_idxs = _select_time_indices_generic(per_run_epochs[ref_run], time_spec)
-    if not row_idxs:
-        print(
-            "[SKIP] fig5: time_spec matched nothing; available:",
-            per_run_epochs[ref_run],
-        )
-        return None
+    ref_times = per_run_epochs[ref_run]
 
-    fig, axes = plt.subplots(len(row_idxs), 2, figsize=(11, 3.8 * len(row_idxs)))
-    if len(row_idxs) == 1:
-        axes = np.array([axes])
-    plt.rcParams.update({"font.size": fontsize})
+    # Interpret time_spec: "all" -> first,middle,last  (per your request)
+    spec_norm = (time_spec or "last").strip().lower()
+    if spec_norm == "all":
+        want_labels = ["first", "middle", "last"]
+    else:
+        want_labels = [s.strip() for s in spec_norm.split(",") if s.strip()]
 
-    for row_i, idx in enumerate(row_idxs):
-        epoch_label = (
-            per_run_epochs[ref_run][idx]
-            if idx < len(per_run_epochs[ref_run])
-            else f"idx{idx}"
-        )
-        axL, axR = axes[row_i, 0], axes[row_i, 1]
+    # Resolve each requested label or numeric into an index *and* a label suffix
+    def _index_and_suffix(label: str):
+        if label in ("first", "middle", "last"):
+            if label == "first":
+                return 0, "first"
+            if label == "middle":
+                return len(ref_times) // 2, "middle"
+            if label == "last":
+                return len(ref_times) - 1, "last"
+        # numeric epoch or index-like token
+        try:
+            tnum = int(label)
+            # snap to nearest epoch value of the reference run
+            arr = np.asarray(ref_times, dtype=float)
+            idx = int(np.argmin(np.abs(arr - float(tnum))))
+            return idx, f"t{tnum}"
+        except Exception:
+            # fallback: try to parse like "idx12"
+            m = re.match(r"idx(\d+)$", label)
+            if m:
+                idx = min(int(m.group(1)), max(0, len(ref_times) - 1))
+                return idx, f"idx{idx}"
+        return None, None
+
+    # Utility: build per-timepoint filename by inserting suffix before extension
+    def _with_suffix(path: str, suffix: str) -> str:
+        if not path:
+            # default name if no savepath given
+            base = os.path.join(
+                "./figs",
+                f"fig5_weights_and_spectrum_{_short_label_from_root(condition_root)}.png",
+            )
+        else:
+            base = path
+        root, ext = os.path.splitext(base)
+        return f"{root}_{suffix}{ext or '.png'}"
+
+    made_any = False
+    for req in want_labels:
+        idx, suffix = _index_and_suffix(req)
+        if idx is None:
+            print(f"[SKIP] fig5: could not interpret time token {req!r}")
+            continue
+        if not (0 <= idx < len(ref_times)):
+            print(f"[SKIP] fig5: index {idx} out of range for {condition_root}")
+            continue
+
+        epoch_label = ref_times[idx]  # for titles
 
         # Collect cached sorted W for each run at this row’s per-run index
         Ws_sorted = []
@@ -1321,15 +1311,42 @@ def fig5_weights_and_spectrum_from_checkpoints(
                 continue
 
         if not Ws_sorted:
-            print(f"[SKIP] fig5 row {row_i}: no sorted Ws for epoch ~{epoch_label}")
-            axL.axis("off")
-            axR.axis("off")
+            print(f"[SKIP] fig5 {suffix}: no sorted Ws for epoch ~{epoch_label}")
             continue
 
         Ws_sorted = np.stack(Ws_sorted, axis=0)  # [R,H,H]
+        if Ws_sorted.dtype == np.float16:
+            Ws_sorted = Ws_sorted.astype(np.float32, copy=False)
         Wm = Ws_sorted.mean(axis=0)
 
-        # Left: diagonal-offset trace mean ± sd
+        # Build a 1-row, 3-column figure for this timepoint
+        fig, (axW, axL, axR) = plt.subplots(1, 3, figsize=(16, 4.0))
+        plt.rcParams.update({"font.size": fontsize})
+
+        # --- Heatmap (Wm)
+        vmax = float(np.max(np.abs(Wm))) if Wm.size else 1.0
+        if not np.isfinite(vmax) or vmax <= 0:
+            vmax = 1.0
+        im = axW.imshow(
+            Wm,
+            cmap="RdBu_r",
+            vmin=-1.05 * vmax,
+            vmax=+1.05 * vmax,
+            interpolation="nearest",
+            aspect="equal",
+        )
+        cb = plt.colorbar(im, ax=axW, fraction=0.046, pad=0.04)
+        cb.set_label("weight", rotation=270, labelpad=12)
+        cb.ax.tick_params(labelsize=max(8, fontsize - 3))
+        _style(
+            axW,
+            fontsize,
+            title=f"W (sorted) — epoch {epoch_label}",
+            xlabel="Presynaptic (sorted)",
+            ylabel="Postsynaptic (sorted)",
+        )
+
+        # --- Diagonal-offset trace mean ± sd
         offs = np.arange(-(Wm.shape[0] - 1), Wm.shape[0], dtype=int)
         traces = np.stack(
             [
@@ -1355,16 +1372,19 @@ def fig5_weights_and_spectrum_from_checkpoints(
         _style(
             axL,
             fontsize,
-            title=f"Trace (mean±sd) — epoch {epoch_label}",
+            title="Trace (mean±sd)",
             xlabel="Diagonal offset k",
             ylabel="∑ diag_k W",
         )
         axL.legend(frameon=False, fontsize=max(8, fontsize - 2))
 
-        # Right: eigenspectrum of mean(W_sorted) + faint per-run cloud (ALWAYS on)
-        eig_mean = np.linalg.eigvals(Wm)
+        # --- Eigenspectrum (mean + per-run cloud)
+        eig_mean = np.linalg.eigvals(Wm.astype(np.float64, copy=False))
         evs = np.concatenate(
-            [np.linalg.eigvals(Ws_sorted[r]) for r in range(Ws_sorted.shape[0])]
+            [
+                np.linalg.eigvals(Ws_sorted[r].astype(np.float64, copy=False))
+                for r in range(Ws_sorted.shape[0])
+            ]
         )
         axR.scatter(evs.real, evs.imag, s=6, alpha=0.12, label="runs")
         axR.scatter(eig_mean.real, eig_mean.imag, s=10, alpha=0.9, label="mean(W)")
@@ -1379,21 +1399,23 @@ def fig5_weights_and_spectrum_from_checkpoints(
         _style(
             axR,
             fontsize,
-            title=f"Eigenspectrum — epoch {epoch_label} (ρ≈{rho:.3f})",
+            title=f"Eigenspectrum (ρ≈{rho:.3f})",
             xlabel="Re(λ)",
             ylabel="Im(λ)",
             legend=True,
         )
 
-    try:
-        fig.set_constrained_layout(True)
-    except Exception:
-        fig.tight_layout()
-    if savepath:
-        _savefig(fig, savepath)
-    else:
-        plt.show()
-    return fig
+        # Save (or show) this timepoint’s figure
+        if savepath:
+            out_path = _with_suffix(savepath, suffix)
+            _savefig(fig, out_path, constrain=False)
+        else:
+            plt.show()
+        made_any = True
+
+    if not made_any:
+        print("[SKIP] fig5: no figures produced for", condition_root)
+    return None
 
 
 # ---------------------------
@@ -1403,12 +1425,6 @@ def fig5_weights_and_spectrum_from_checkpoints(
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Generate figures from aggregated metrics")
-    p.add_argument(
-        "--agg_dir",
-        type=str,
-        default="./runs_agg",
-        help="Directory containing run_level.csv & condition_summary.csv",
-    )
     p.add_argument("--figdir", type=str, default="./figs", help="Where to save PNGs")
     p.add_argument(
         "--fontsize", type=int, default=12, help="Base font size for all plots"
@@ -1498,12 +1514,10 @@ def main(argv=None):
         for pat in patterns:
             cond_roots.extend(sorted(glob.glob(pat)))
 
-    if cond_roots:
-        # Multi-condition path
-        rl, cs, off, ev = load_many_conditions(cond_roots)
-    else:
-        # Backward-compatible single-agg-dir path
-        rl, cs, off, ev = load_all(agg_dir=args.agg_dir)
+    if not cond_roots:
+        print("[ERROR] Please provide condition roots via --conditions or --cond_glob.")
+        return
+    rl, cs, off, ev = load_many_conditions(cond_roots)
 
     rl = _filter_df(rl, args.condition_regex, args.run_regex)
     cs = _filter_df(cs, args.condition_regex, args.run_regex)
@@ -1522,7 +1536,7 @@ def main(argv=None):
     if want(1):
         fig1_path = os.path.join(args.figdir, f"fig1_training_dynamics{suffix}.png")
         fig1_training_dynamics(
-            cond_roots if cond_roots else [args.agg_dir],
+            cond_roots,
             fig1_path,
             fontsize=args.fontsize,
             logxA=args.fig1_logxA,
@@ -1549,8 +1563,7 @@ def main(argv=None):
             fontsize=args.fontsize,
         )
     if want(4):
-        roots = cond_roots if cond_roots else [args.agg_dir]
-        for root in roots:
+        for root in cond_roots:
             fig4_path = os.path.join(
                 args.figdir, f"fig4_{_short_label_from_root(root)}{suffix}.png"
             )
@@ -1565,8 +1578,7 @@ def main(argv=None):
                 vmax=args.vmax,
             )
     if want(5):
-        roots = cond_roots if cond_roots else [args.agg_dir]
-        for root in roots:
+        for root in cond_roots:
             short = _short_label_from_root(root)  # e.g., identity_n100_fro
             per_suffix = f"_{args.figtag}_{short}" if args.figtag else f"_{short}"
             fig5_path = os.path.join(

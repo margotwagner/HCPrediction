@@ -44,10 +44,10 @@ python evaluate.py \
 
 # SHIFTED MH
 python evaluate.py \
- --base-dir ./runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/sym1p00/shiftcycmh_n100_fro_sym1p00 \
- --runs 0-2 \
+ --base-dir ./runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/sym0p50/shiftcycmh_n100_fro_sym0p50 \
+ --runs 0-5 \
  --mode all \
- --csv runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/sym1p00/shiftcycmh_n100_fro_sym1p00/shiftcycmh_n100_fro_sym1p00_eval.csv
+ --csv runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/sym0p50/shiftcycmh_n100_fro_sym0p50/shiftcycmh_n100_fro_sym0p50_eval.csv
 
 # SHIFT
 python evaluate.py \
@@ -63,7 +63,7 @@ python evaluate.py \
 # 3.) Run offline metrics generation
 python offline_metrics.py --ckpt ./runs/ElmanRNN/random-init/random_n100/
 
-python offline_metrics.py --ckpt ./runs/ElmanRNN/mh-variants/shifted/
+python offline_metrics.py --ckpt ./runs/ElmanRNN/mh-variants/shifted-cyc/
 
 python offline_metrics.py --ckpt ./runs/ElmanRNN/shift-variants/identity/
 
@@ -79,7 +79,7 @@ python aggregate_metrics.py --root ./runs/ElmanRNN/noisy/shift-variants/identity
 python aggregate_metrics.py --root ./runs/ElmanRNN/mh-variants/cent-cyc/frobenius/centcycmh_n100_fro
 
 python aggregate_metrics.py \
-  --root "./runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/sym1p00/shiftcycmh_n100_fro_sym1p00" 
+  --root "./runs/ElmanRNN/mh-variants/shifted-cyc/frobenius/sym0p50/shiftcycmh_n100_fro_sym0p50" 
 
 python aggregate_metrics.py \
   --root "./runs/ElmanRNN/shift-variants/shift-cyc/frobenius/sym0p75/shiftcyc_n100_fro_sym0p75" 

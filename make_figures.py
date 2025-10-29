@@ -4,7 +4,7 @@
 make_figures.py
 - Matplotlib-only figure suite for your Elman RNN project.
 - Works both as a CLI script and as an importable module for notebooks.
-- Python 3.6.7-compatible; no torch.* usage.
+- Python 3.6.7-compatible
 
 Inputs (flexible):
 - Aggregated CSVs:
@@ -27,16 +27,16 @@ Notebook usage:
 
 from __future__ import print_function
 import os
-import sys
 import glob
-import json
-import math
+import csv
 import argparse
 import re
 import numpy as np
 import pandas as pd
 import matplotlib
 from pathlib import Path
+from typing import Optional
+from matplotlib.lines import Line2D
 
 matplotlib.use("Agg")  # safe for headless
 import matplotlib.pyplot as plt
@@ -237,7 +237,6 @@ def _fit_slope(x, y, logx=False, logy=False):
     according to logx/logy (base-10). We fit y_t = m*x_t + b where
     x_t = log10(x) if logx else x, and y_t = log10(y) if logy else y.
     """
-    import numpy as np
 
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -284,6 +283,14 @@ def _alpha_series_from_runlevel(df: pd.DataFrame):
     return tcol, t, alpha
 
 
+def _linestyle_map_for_alphas(alpha_vals):
+    """Stable map: sorted unique α0 -> a distinct linestyle."""
+    LINESTYLES_ORDER = ["-", "--", "-.", ":", (0, (1, 1))]
+    levels = sorted(set(float(a) for a in alpha_vals if pd.notna(a)))
+    ls = {a: LINESTYLES_ORDER[i % len(LINESTYLES_ORDER)] for i, a in enumerate(levels)}
+    return ls, levels
+
+
 # ---------------------------
 # Matplotlib style utilities
 # ---------------------------
@@ -318,6 +325,52 @@ def _savefig(fig, path):
     print("[SAVE]", path)
 
 
+def _build_metrics_table_from_condition_summary(
+    cs: pd.DataFrame, prefer: list
+) -> Optional[pd.DataFrame]:
+    """
+    From condition_summary (long form: ['condition_id','metric','mean','std']),
+    build a compact table (rows = metrics present & ordered by 'prefer';
+    columns = condition_id; cells = 'mean±std' rounded).
+
+    Returns a DataFrame of strings, or None if nothing usable.
+    """
+    if cs is None or cs.empty:
+        return None
+    need = {"condition_id", "metric", "mean", "std"}
+    if not need.issubset(cs.columns):
+        return None
+
+    present = [m for m in prefer if m in cs["metric"].unique()]
+    if not present:
+        return None
+
+    def _fmt(m, s):
+        if pd.isna(m):
+            return ""
+        if pd.isna(s) or s == 0:
+            return f"{float(m):.3g}"
+        return f"{float(m):.3g}±{float(s):.2g}"
+
+    rows = []
+    conds = sorted(cs["condition_id"].unique())
+    for m in present:
+        row = {"metric": m}
+        sub = cs[cs["metric"] == m]
+        for c in conds:
+            chunk = sub[sub["condition_id"] == c]
+            if chunk.empty:
+                row[c] = ""
+            else:
+                row[c] = _fmt(
+                    chunk["mean"].iloc[0],
+                    chunk["std"].iloc[0] if "std" in chunk.columns else float("nan"),
+                )
+        rows.append(row)
+    table = pd.DataFrame(rows)
+    return table[["metric"] + conds]
+
+
 # ---------------------------
 # Figure 1 – Training speed
 # ---------------------------
@@ -326,8 +379,6 @@ def _savefig(fig, path):
 def _gather_series(condition_roots, pattern):
     """Collect per-run timeseries matching a filename pattern under each condition root.
     Returns dict: {cond_id: [DataFrame_per_run_with_epoch_index, ...]}."""
-    import glob, os
-    import pandas as pd
 
     out = {}
     for root in condition_roots:
@@ -347,7 +398,6 @@ def _gather_series(condition_roots, pattern):
 
 def _mean_sem_align(dfs, col):
     """Align on union of epochs; return (epochs, mean, sem)."""
-    import pandas as pd, numpy as np
 
     if not dfs:
         return None, None, None
@@ -490,6 +540,17 @@ def fig2_symmetry_vs_performance(
     fig, axs = plt.subplots(2, 2, figsize=(12, 7.5))
     (axA, axB), (axC, axD) = axs
 
+    # Capture family→color chosen by MPL in A–C so D reuses them
+    FAMILY_COLOR = {}  # e.g., {"shift": "#1f77b4", ...}
+    FAMILY_ORDER = []  # keep insertion order for a stable color legend
+
+    def _record_color_from_line(fam: str, line_obj):
+        if fam not in FAMILY_COLOR and line_obj is not None:
+            c = getattr(line_obj, "get_color", lambda: None)()
+            if c:
+                FAMILY_COLOR[fam] = c
+                FAMILY_ORDER.append(fam)
+
     # -------------------------
     # Panels A, B, C  — condition_summary
     # -------------------------
@@ -534,24 +595,62 @@ def fig2_symmetry_vs_performance(
             if "best_loss" in csw_mean.columns:
                 x = csw_mean["alpha"].values
                 y = csw_mean["best_loss"].values
-                if csw_std is not None and "best_loss" in csw_std.columns:
-                    yerr = (
-                        csw_std.set_index("condition_id")["best_loss"]
-                        .reindex(csw_mean["condition_id"])
-                        .values
-                    )
-                    axA.errorbar(
-                        x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
-                    )
+                if fam in FAMILY_COLOR:
+                    color = FAMILY_COLOR[fam]
+                    if csw_std is not None and "best_loss" in csw_std.columns:
+                        yerr = (
+                            csw_std.set_index("condition_id")["best_loss"]
+                            .reindex(csw_mean["condition_id"])
+                            .values
+                        )
+                        cont = axA.errorbar(
+                            x,
+                            y,
+                            yerr=yerr,
+                            fmt="-o",
+                            capsize=3,
+                            linewidth=1.6,
+                            color=color,
+                            ecolor=color,
+                            label=fam,
+                        )
+                        _record_color_from_line(
+                            fam,
+                            cont.lines[0]
+                            if hasattr(cont, "lines") and cont.lines
+                            else None,
+                        )
+                    else:
+                        (line,) = axA.plot(
+                            x, y, "-o", linewidth=1.6, color=color, label=fam
+                        )
+                        _record_color_from_line(fam, line)
                 else:
-                    axA.plot(x, y, "-o", linewidth=1.6, label=fam)
-                _style(
-                    axA,
-                    fontsize,
-                    title="A — Best training loss (↓) vs α₀",
-                    xlabel=r"$\alpha_0$ (symmetry at $t=0$)",
-                    ylabel="best_loss",
-                )
+                    # let MPL pick color, then record it
+                    if csw_std is not None and "best_loss" in csw_std.columns:
+                        yerr = (
+                            csw_std.set_index("condition_id")["best_loss"]
+                            .reindex(csw_mean["condition_id"])
+                            .values
+                        )
+                        cont = axA.errorbar(
+                            x,
+                            y,
+                            yerr=yerr,
+                            fmt="-o",
+                            capsize=3,
+                            linewidth=1.6,
+                            label=fam,
+                        )
+                        _record_color_from_line(
+                            fam,
+                            cont.lines[0]
+                            if hasattr(cont, "lines") and cont.lines
+                            else None,
+                        )
+                    else:
+                        (line,) = axA.plot(x, y, "-o", linewidth=1.6, label=fam)
+                        _record_color_from_line(fam, line)
                 plotted_any["A"] = True
             else:
                 axA.axis("off")
@@ -560,50 +659,100 @@ def fig2_symmetry_vs_performance(
             if "mse_open" in csw_mean.columns:
                 x = csw_mean["alpha"].values
                 y = csw_mean["mse_open"].values
+                color = FAMILY_COLOR.get(fam, None)
                 if csw_std is not None and "mse_open" in csw_std.columns:
                     yerr = (
                         csw_std.set_index("condition_id")["mse_open"]
                         .reindex(csw_mean["condition_id"])
                         .values
                     )
-                    axB.errorbar(
-                        x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
+                    cont = (
+                        axB.errorbar(
+                            x,
+                            y,
+                            yerr=yerr,
+                            fmt="-o",
+                            capsize=3,
+                            linewidth=1.6,
+                            color=color,
+                            ecolor=color,
+                            label=fam,
+                        )
+                        if color
+                        else axB.errorbar(
+                            x,
+                            y,
+                            yerr=yerr,
+                            fmt="-o",
+                            capsize=3,
+                            linewidth=1.6,
+                            label=fam,
+                        )
+                    )
+                    _record_color_from_line(
+                        fam,
+                        cont.lines[0]
+                        if hasattr(cont, "lines") and cont.lines
+                        else None,
                     )
                 else:
-                    axB.plot(x, y, "-o", linewidth=1.6, label=fam)
-                _style(
-                    axB,
-                    fontsize,
-                    title="B — Best open-loop MSE (↓) vs α₀",
-                    xlabel=r"$\alpha_0$",
-                    ylabel="mse_open",
-                )
+                    (line,) = (
+                        axB.plot(x, y, "-o", linewidth=1.6, color=color, label=fam)
+                        if color
+                        else axB.plot(x, y, "-o", linewidth=1.6, label=fam)
+                    )
+                    _record_color_from_line(fam, line)
                 plotted_any["B"] = True
             else:
                 axB.axis("off")
 
-            # Panel C: closed-loop metric vs alpha0 — STRICT: require 'mse_free_closed'
+            # Panel C: CLOSED — strict 'mse_free_closed'
             if "mse_free_closed" in csw_mean.columns:
                 x = csw_mean["alpha"].values
                 y = csw_mean["mse_free_closed"].values
+                color = FAMILY_COLOR.get(fam, None)
                 if csw_std is not None and "mse_free_closed" in csw_std.columns:
                     yerr = (
                         csw_std.set_index("condition_id")["mse_free_closed"]
                         .reindex(csw_mean["condition_id"])
                         .values
                     )
-                    axC.errorbar(
-                        x, y, yerr=yerr, fmt="-o", capsize=3, linewidth=1.6, label=fam
+                    cont = (
+                        axC.errorbar(
+                            x,
+                            y,
+                            yerr=yerr,
+                            fmt="-o",
+                            capsize=3,
+                            linewidth=1.6,
+                            color=color,
+                            ecolor=color,
+                            label=fam,
+                        )
+                        if color
+                        else axC.errorbar(
+                            x,
+                            y,
+                            yerr=yerr,
+                            fmt="-o",
+                            capsize=3,
+                            linewidth=1.6,
+                            label=fam,
+                        )
+                    )
+                    _record_color_from_line(
+                        fam,
+                        cont.lines[0]
+                        if hasattr(cont, "lines") and cont.lines
+                        else None,
                     )
                 else:
-                    axC.plot(x, y, "-o", linewidth=1.6, label=fam)
-                _style(
-                    axC,
-                    fontsize,
-                    title="C — Best closed-loop MSE (↓) vs α₀ [mse_free_closed]",
-                    xlabel=r"$\alpha_0$",
-                    ylabel="mse_free_closed",
-                )
+                    (line,) = (
+                        axC.plot(x, y, "-o", linewidth=1.6, color=color, label=fam)
+                        if color
+                        else axC.plot(x, y, "-o", linewidth=1.6, label=fam)
+                    )
+                    _record_color_from_line(fam, line)
                 plotted_any["C"] = True
             else:
                 # Strict behavior: do not substitute any other column
@@ -625,11 +774,13 @@ def fig2_symmetry_vs_performance(
                     f"Figure 2 — Performance vs α₀ (condition: {single_family})",
                     fontsize=fontsize + 2,
                 )
+                fig.subplots_adjust(top=0.90)
             else:
                 fig.suptitle("Figure 2 — Performance vs α₀", fontsize=fontsize + 2)
+                fig.subplots_adjust(top=0.90)
 
     # -------------------------
-    # Panel D — alpha(t) from run_level.csv
+    # Panel D — alpha(t) from run_level.csv (reuse A–C colors; α0 -> linestyle)
     # -------------------------
     if run_level_df is None or run_level_df.empty:
         axD.axis("off")
@@ -654,7 +805,16 @@ def fig2_symmetry_vs_performance(
                 fontsize=fontsize,
             )
         else:
-            # thin per-run lines
+            # derive family & alpha0 per condition (family must match A–C parsing logic)
+            df_rl["family"] = df_rl["condition_id"].apply(
+                lambda cid: os.path.basename(str(cid)).split("_")[0]
+            )
+            df_rl["alpha0"] = df_rl["condition_id"].apply(_alpha_from_condition_id)
+
+            # Build linestyle map from α0 levels present (stable)
+            ls_map, alpha_levels = _linestyle_map_for_alphas(df_rl["alpha0"].unique())
+
+            # thin per-run traces (color by family from A–C; linestyle by α0)
             group_keys = ["condition_id"] + (
                 ["run_id"] if "run_id" in df_rl.columns else []
             )
@@ -663,10 +823,34 @@ def fig2_symmetry_vs_performance(
                 if tcol_g is None:
                     continue
                 order = np.argsort(t)
-                axD.plot(t[order], a[order], lw=1, alpha=0.25)
+                fam = g["family"].iloc[0]
+                a0 = (
+                    float(g["alpha0"].iloc[0])
+                    if pd.notna(g["alpha0"].iloc[0])
+                    else None
+                )
+                color = FAMILY_COLOR.get(fam, None) or "k"
+                lstyle = ls_map.get(a0, "-")
+                axD.plot(
+                    t[order],
+                    a[order],
+                    lw=1.0,
+                    alpha=0.30,
+                    color=color,
+                    linestyle=lstyle,
+                )
 
-            # per-condition median + IQR
+            # per-condition median + IQR (same color & linestyle)
             for cond, cdf in df_rl.groupby("condition_id"):
+                fam = cdf["family"].iloc[0]
+                a0 = (
+                    float(cdf["alpha0"].iloc[0])
+                    if pd.notna(cdf["alpha0"].iloc[0])
+                    else None
+                )
+                color = FAMILY_COLOR.get(fam, None) or "k"
+                lstyle = ls_map.get(a0, "-")
+
                 tcol_c, _, _ = _alpha_series_from_runlevel(cdf)
                 if tcol_c is None:
                     continue
@@ -676,19 +860,22 @@ def fig2_symmetry_vs_performance(
                 med, q1, q3 = [], [], []
                 for x in xs:
                     sub = cdf[pd.to_numeric(cdf[tcol_c], errors="coerce") == x]
-                    _, _, a = _alpha_series_from_runlevel(sub)
-                    a = a[np.isfinite(a)]
-                    if a.size == 0:
+                    _, _, aa = _alpha_series_from_runlevel(sub)
+                    aa = aa[np.isfinite(aa)]
+                    if aa.size == 0:
                         med.append(np.nan)
                         q1.append(np.nan)
                         q3.append(np.nan)
                     else:
-                        med.append(np.nanmedian(a))
-                        q1.append(np.nanpercentile(a, 25))
-                        q3.append(np.nanpercentile(a, 75))
+                        med.append(np.nanmedian(aa))
+                        q1.append(np.nanpercentile(aa, 25))
+                        q3.append(np.nanpercentile(aa, 75))
+
                 xs = xs.astype(float)
-                axD.plot(xs, med, lw=2.5, label=str(cond))
-                axD.fill_between(xs, q1, q3, alpha=0.15)
+                axD.plot(
+                    xs, med, lw=2.2, color=color, linestyle=lstyle, label=str(cond)
+                )
+                axD.fill_between(xs, q1, q3, alpha=0.12, color=color)
 
             _style(
                 axD,
@@ -696,8 +883,68 @@ def fig2_symmetry_vs_performance(
                 title="D — alpha(t) from run_level",
                 xlabel="epoch",
                 ylabel=r"alpha(t) = $\|S\|_F / (\|S\|_F + \|A\|_F)$",
-                legend=True,
             )
+
+            # Compact dual legend: colors = families (from A–C); styles = α0 levels
+
+            fams_present = [f for f in FAMILY_ORDER if f in FAMILY_COLOR] or sorted(
+                df_rl["family"].dropna().unique()
+            )
+            color_handles = [
+                Line2D([0], [0], color=FAMILY_COLOR.get(f, "k"), lw=2.6, label=f)
+                for f in fams_present
+            ]
+            style_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    color="k",
+                    lw=2.6,
+                    linestyle=ls_map[a],
+                    label=f"α₀={a:.2f}",
+                )
+                for a in alpha_levels
+            ]
+
+            leg1 = axD.legend(
+                handles=color_handles,
+                title="Init type",
+                frameon=False,
+                fontsize=max(7, fontsize - 4),
+                title_fontsize=max(8, fontsize - 3),
+                loc="upper left",
+            )
+            axD.add_artist(leg1)
+            axD.legend(
+                handles=style_handles,
+                title="α₀ line style",
+                frameon=False,
+                fontsize=max(7, fontsize - 4),
+                title_fontsize=max(8, fontsize - 3),
+                loc="lower left",
+            )
+    # Add this right after the legends for A/B/C, before Panel D starts
+    _style(
+        axA,
+        fontsize,
+        title="A — Best training loss (↓) vs α₀",
+        xlabel=r"$\alpha_0$ (symmetry at $t=0$)",
+        ylabel="best_loss",
+    )
+    _style(
+        axB,
+        fontsize,
+        title="B — Best open-loop MSE (↓) vs α₀",
+        xlabel=r"$\alpha_0$",
+        ylabel="mse_open",
+    )
+    _style(
+        axC,
+        fontsize,
+        title="C — Best closed-loop MSE (↓) vs α₀ [mse_free_closed]",
+        xlabel=r"$\alpha_0$",
+        ylabel="mse_free_closed",
+    )
 
     # Layout & save
     try:
@@ -715,242 +962,618 @@ def fig2_symmetry_vs_performance(
 # -----------------------------------------------------------
 
 
-def fig3_traveling_wave_and_polar(
-    condition_dir,
-    run_select="best_replay",  # best_replay or best_mse
-    savepath=None,
-    fontsize=12,
-    max_units=100,
-    vmin=None,
-    vmax=None,
+def fig3_traveling_waves_and_replay(
+    condition_dir: str,
+    run_level_df: Optional[pd.DataFrame],
+    condition_summary_df: Optional[pd.DataFrame],
+    savepath: Optional[str] = None,
+    fontsize: int = 12,
+    max_units: int = 100,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
 ):
     """
-    Panel A: hidden heatmaps (replay & prediction), time x unit (units sorted by peak time).
-    Panel B: polar angle vs time (replay=pred only; prediction=pred + true).
-    Expects per-run trace files saved by evaluate.py:
+    Top-Left  (A): Replay hidden heatmap (z-scored, units sorted by peak time)
+    Top-Right (B): Prediction hidden heatmap (same)
+    Bottom-Left (C): Polar angle trajectories (decoded vs true if present)
+    Bottom-Right (D): Metrics table from condition_summary (mean±std, only metrics that exist)
+
+    Self-contained: selects the "best" run and loads required files inline:
       *_replay_hidden.npy, *_prediction_hidden.npy,
       *_replay_angles.csv,  *_prediction_angles.csv
     """
-    import pandas as pd
 
-    condition_dir = Path(str(condition_dir).strip()).expanduser()
+    cond = Path(str(condition_dir).strip()).expanduser()
 
-    # Try exact, then relative-with-leading-dot, then any *run_level*.csv
+    # --- Locate run_level.csv inside the condition (robust to ./runs vs runs/)
     candidates = [
-        condition_dir / "run_level.csv",
-        Path("." + str(condition_dir))
-        / "run_level.csv",  # handles accidental leading '/'
+        cond / "run_level.csv",
+        Path("." + str(cond)) / "run_level.csv",
     ]
-    candidates += list(condition_dir.glob("*run_level*.csv"))
-
-    # Pick the first that exists
+    candidates += list(cond.glob("*run_level*.csv"))
     rpath = next((p for p in candidates if p.exists()), None)
 
-    print("[fig3] condition_dir:", condition_dir)
-    # print("[fig3] run_level candidates:", [str(p) for p in candidates])
-    # print("[fig3] chosen run_level.csv:", rpath)
-
+    print("[fig3] condition_dir:", cond)
     if rpath is None:
         try:
-            print("[fig3] ls:", os.listdir(str(condition_dir)))
+            print("[fig3] ls:", os.listdir(str(cond)))
         except Exception as e:
             print("[fig3] cannot list dir:", e)
-        print(f"[SKIP] fig3: no run_level.csv in {condition_dir}")
+        print(f"[SKIP] fig3: no run_level.csv in {cond}")
         return
 
-    # anchor all paths to the *actual* CSV's parent dir (avoids /runs vs ./runs mismatch)
-    condition_dir = rpath.parent.resolve()
+    # Anchor to the actual CSV parent to avoid path mismatches
+    cond = rpath.parent.resolve()
 
-    # Decide which run to visualize, based on run_level.csv
+    # --- Read run_level.csv and pick a run (old inline logic, with robust fallbacks)
     df = pd.read_csv(str(rpath))
     if df.empty:
-        print(f"[SKIP] fig3: run_level.csv is empty in {condition_dir}")
+        print(f"[SKIP] fig3: run_level.csv is empty in {cond}")
         return
 
-    # Choose the “best” run for the requested criterion
-    if run_select == "best_replay" and "replay_r2" in df.columns:
-        pick = df.sort_values("replay_r2", ascending=False).head(1)
-    else:
+    def _pick_best_row(frame: pd.DataFrame):
+        # Prefer highest replay metric if present; else lowest mse_open; else lowest final_loss
+        if "replay_r2" in frame.columns and not frame["replay_r2"].isna().all():
+            return frame.sort_values("replay_r2", ascending=False).head(1)
         key = (
             "mse_open"
-            if "mse_open" in df.columns
-            else ("final_loss" if "final_loss" in df.columns else None)
+            if "mse_open" in frame.columns
+            else ("final_loss" if "final_loss" in frame.columns else None)
         )
-        if key is None:
-            print(
-                f"[SKIP] fig3: neither 'replay_r2' nor ('mse_open'/'final_loss') in run_level.csv"
-            )
-            return
-        pick = df.sort_values(key, ascending=(key != "replay_r2")).head(1)
+        if key is None or frame[key].isna().all():
+            return frame.head(1)
+        return frame.sort_values(key, ascending=True).head(1)
 
+    pick = _pick_best_row(df)
     if pick.empty or "run_id" not in pick.columns:
         print(f"[SKIP] fig3: cannot identify run_id from run_level.csv")
         return
-
+    try:
+        run_id = int(pick.iloc[0]["run_id"])
+    except Exception:
+        print(f"[SKIP] fig3: invalid run_id value: {pick.iloc[0]['run_id']!r}")
+        return
     run_id = int(pick.iloc[0]["run_id"])
 
-    # resolve stub paths inside run_XX
-    run_dir = condition_dir / f"run_{int(run_id):02d}"
-    # Find a stub from the checkpoint filename:
+    # --- Resolve checkpoint stub to find trace/angle files
+    run_dir = cond / f"run_{run_id:02d}"
     ckpts = list(run_dir.glob("*.pth.tar"))
     if not ckpts:
         print(f"[SKIP] fig3: no checkpoint in {run_dir}")
         return
-
-    # strip the trailing ".pth.tar" to get the stub
     ckpt_path = str(ckpts[0])
-    if ckpt_path.endswith(".pth.tar"):
-        stub = ckpt_path[:-8]  # drop the 8 chars ".pth.tar"
-    else:
-        # fallback: drop one suffix
-        stub = str(Path(ckpt_path).with_suffix(""))
-
-    # load traces (allow missing prediction files gracefully)
-    rp_h = (
-        np.load(stub + "_replay_hidden.npy")
-        if os.path.exists(stub + "_replay_hidden.npy")
-        else None
-    )
-    pr_h = (
-        np.load(stub + "_prediction_hidden.npy")
-        if os.path.exists(stub + "_prediction_hidden.npy")
-        else None
+    stub = (
+        ckpt_path[:-8]
+        if ckpt_path.endswith(".pth.tar")
+        else str(Path(ckpt_path).with_suffix(""))
     )
 
-    def _read_angles_csv(path):
-        if not os.path.exists(path):
+    # --- Load hidden traces (if present); accept [B,T,N] or [T,N]; cap N
+    def _to_TN(arr):
+        if arr is None:
             return None
-        import csv
+        A = np.asarray(arr)
+        if A.ndim == 3:  # [B,T,N]
+            A = A[0]
+        return A if A.ndim == 2 else None
 
-        rows = []
-        with open(path, "r") as f:
-            for i, r in enumerate(csv.reader(f)):
-                if i == 0:  # header
-                    header = r
-                    continue
-                rows.append(r)
-        arr = np.array(rows, dtype=float) if rows else None
-        return header, arr
+    def _load_hidden_if(path):
+        return _to_TN(np.load(path)) if os.path.exists(path) else None
 
-    rp_hdr, rp_ang = _read_angles_csv(stub + "_replay_angles.csv")
-    pr_hdr, pr_ang = _read_angles_csv(stub + "_prediction_angles.csv")
+    rp_h = _load_hidden_if(stub + "_replay_hidden.npy")
+    pr_h = _load_hidden_if(stub + "_prediction_hidden.npy")
 
     if rp_h is None and pr_h is None:
         print(f"[SKIP] fig3: no hidden traces in {run_dir}")
         return
+    if rp_h is not None and rp_h.shape[1] > max_units:
+        rp_h = rp_h[:, :max_units]
+    if pr_h is not None and pr_h.shape[1] > max_units:
+        pr_h = pr_h[:, :max_units]
 
-    # --- Panel A: heatmaps ---
-    fig = plt.figure(figsize=(12, 6), constrained_layout=True)
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.2, 1.0])
-
-    # helper to plot one heatmap (first batch only)
-    def _heatmap(ax, H, title):
-        # H: [B,T,H] -> use B=0
-        X = H[0]  # [T,H]
-        # z-score per unit for visualization
-        Xm = X - X.mean(axis=0, keepdims=True)
-        Xs = X.std(axis=0, keepdims=True) + 1e-9
-        Z = Xm / Xs
-
-        # sort units by peak time to reveal wave
+    # --- Z-score per unit and sort by time-of-peak (wave reveal)
+    def _zsort(H):
+        if H is None:
+            return None, None
+        Z = (H - H.mean(axis=0, keepdims=True)) / (H.std(axis=0, keepdims=True) + 1e-8)
         peak_t = np.argmax(Z, axis=0)
         order = np.argsort(peak_t)
-        if Z.shape[1] > max_units:
-            order = order[:max_units]
-        Zs = Z[:, order].T  # [units, time]
+        return Z[:, order].T, order  # [units,time], permutation
 
-        # flexible vmin/vmax
-        vmin_eff = np.min(Zs) if vmin is None else vmin
-        vmax_eff = np.max(Zs) if vmax is None else vmax
+    rp_z, _ = _zsort(rp_h)
+    pr_z, _ = _zsort(pr_h)
 
+    # --- Angle CSV reading (robust to simple csv)
+    def _read_angles_csv(path):
+        if not os.path.exists(path):
+            return None
+        try:
+            df = pd.read_csv(path)
+            return df
+        except Exception:
+            # fallback: bare csv reader
+            with open(path, "r") as f:
+                rows = list(csv.reader(f))
+            if not rows:
+                return None
+            hdr = rows[0]
+            vals = rows[1:]
+            try:
+                arr = np.array(vals, dtype=float)
+                return pd.DataFrame(arr, columns=hdr[: arr.shape[1]])
+            except Exception:
+                return None
+
+    rp_ang = _read_angles_csv(stub + "_replay_angles.csv")
+    pr_ang = _read_angles_csv(stub + "_prediction_angles.csv")
+
+    def _first_angle_col(df):
+        if df is None or df.empty:
+            return None
+        prefer = ["theta_pred", "theta_true", "theta", "angle", "phi", "ang", "phase"]
+        lower = {c.lower(): c for c in df.columns}
+        for k in prefer:
+            if k in lower:
+                return lower[k]
+        # fallback: first numeric column
+        for c in df.columns:
+            if pd.api.types.is_numeric_dtype(df[c]):
+                return c
+        return None
+
+    # --- Build figure (2x2)
+    fig = plt.figure(figsize=(12, 8))
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.2, 1.0])
+    axA = fig.add_subplot(gs[0, 0])  # replay heatmap
+    axB = fig.add_subplot(gs[0, 1])  # prediction heatmap
+    axC = fig.add_subplot(gs[1, 0], projection="polar")  # polar
+    axD = fig.add_subplot(gs[1, 1])  # table
+
+    plt.rcParams.update({"font.size": fontsize})
+
+    # --- Panel A: replay heatmap
+    def _heatmap(ax, Z, title):
+        if Z is None:
+            ax.axis("off")
+            ax.set_title(f"{title} (missing)", fontsize=fontsize)
+            return
+        vmin_eff = np.min(Z) if vmin is None else vmin
+        vmax_eff = np.max(Z) if vmax is None else vmax
         im = ax.imshow(
-            Zs,
+            Z,
             aspect="auto",
             interpolation="nearest",
             cmap="viridis",
             vmin=vmin_eff,
             vmax=vmax_eff,
         )
-        ax.set_title(title)
+        ax.set_title(title, fontsize=fontsize)
         ax.set_xlabel("time")
         ax.set_ylabel("units (sorted)")
+        cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cb.ax.set_ylabel("activation (z)", rotation=270, labelpad=15)
+        cb.ax.tick_params(labelsize=max(8, fontsize - 3))
 
-        # add colorbar
-        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cbar.ax.set_ylabel("activation (z)", rotation=270, labelpad=15)
-        return im
+    _heatmap(axA, rp_z, "A — Replay hidden (z; peak-sorted)")
+    _heatmap(axB, pr_z, "B — Prediction hidden (z; peak-sorted)")
 
-    axA = fig.add_subplot(gs[0, 0])
-    if rp_h is not None:
-        _heatmap(axA, rp_h, "Replay: hidden (time × unit)")
-    else:
-        axA.axis("off")
-        axA.set_title("Replay: (no trace)")
-
-    axB = fig.add_subplot(gs[0, 1])
-    if pr_h is not None:
-        _heatmap(axB, pr_h, "Prediction: hidden (time × unit)")
-    else:
-        axB.axis("off")
-        axB.set_title("Prediction: (no trace)")
-
-    # --- Panel B: polar plots ---
-    axC = fig.add_subplot(gs[1, :], projection="polar")
-
-    def _plot_polar(ax, hdr, arr, label_pred, label_true=None, color=None):
-        """Plot decoded (solid) and true (dashed) with a shared color for clarity."""
-        if arr is None:
-            return
-        cols = {name: i for i, name in enumerate(hdr)}
-        t = arr[:, cols.get("t", 0)]
-        tp = arr[:, cols.get("theta_pred", 1)]
-        tt = arr[:, cols["theta_true"]] if "theta_true" in cols else None
-
-        # decoded (solid)
-        (ln_pred,) = ax.plot(tp, t, lw=1.8, label=label_pred, color=color)
-        # true (dashed), same hue as decoded
-        if tt is not None:
+    # --- Panel C: polar trajectories (decoded vs true if available)
+    def _plot_polar_angles(ax, df, label, style="-"):
+        if df is None or df.empty:
+            return None
+        t = df["t"].values if "t" in df.columns else np.arange(len(df))
+        # prefer explicit decoded/true; else pick first numeric column as angle
+        a_pred_col = (
+            "theta_pred" if "theta_pred" in df.columns else _first_angle_col(df)
+        )
+        if a_pred_col is None:
+            return None
+        (ln,) = ax.plot(
+            df[a_pred_col].values, t, linestyle=style, linewidth=1.8, label=label
+        )
+        # overlay true in same hue if present
+        if "theta_true" in df.columns:
             ax.plot(
-                tt,
+                df["theta_true"].values,
                 t,
-                lw=1.5,
                 linestyle="--",
-                label=(label_true or f"{label_pred} (true)"),
-                color=ln_pred.get_color() if color is None else color,
+                linewidth=1.6,
+                label=f"{label} (true)",
+                color=ln.get_color(),
             )
+        return ln
 
-    # Replay: blue (C0)
-    _plot_polar(axC, rp_hdr, rp_ang, label_pred="Replay θ̂(t)", color="C0")
+    any_line = False
+    if _plot_polar_angles(axC, rp_ang, "Replay θ̂(t)", "-") is not None:
+        any_line = True
+    if _plot_polar_angles(axC, pr_ang, "Prediction θ̂(t)", "-.") is not None:
+        any_line = True
 
-    # Prediction: orange (C1) with explicit labels
-    _plot_polar(
-        axC,
-        pr_hdr,
-        pr_ang,
-        label_pred="Prediction θ̂(t) (decoded)",
-        label_true="Prediction θ(t) (ground truth)",
-        color="C1",
-    )
+    if any_line:
+        axC.set_title("C — Polar angle trajectories", fontsize=fontsize)
+        axC.legend(
+            loc="center left",
+            bbox_to_anchor=(1.12, 0.5),
+            frameon=False,
+            fontsize=max(8, fontsize - 2),
+        )
+    else:
+        axC.set_title("C — Polar angle trajectories (missing)", fontsize=fontsize)
 
-    axC.set_title("Polar: decoded vs true angle over time")
+    # --- Panel D: compact metrics table (reuse your existing builder)
+    axD.axis("off")
+    prefer_metrics = [
+        # REPLAY
+        "replay_r2",
+        "ring_decode_R2_replay",
+        "angle_error_R_replay",
+        "phase_drift_per_step_replay",
+        "time_to_divergence_replay",
+        "residual_lag1_autocorr_replay",
+        # PREDICTION
+        "ring_decode_R2",
+        "mse",
+        "angle_error_R",
+        "mean_corr",
+        "time_to_divergence",
+    ]
+    # Filter to this condition where possible
+    cs_sub = condition_summary_df
+    if cs_sub is not None and "condition_id" in cs_sub.columns:
+        cid = _infer_condition_id_from_root(str(cond))
+        cs_sub = cs_sub[cs_sub["condition_id"] == cid]
+    table_df = _build_metrics_table_from_condition_summary(cs_sub, prefer_metrics)
 
-    # Move legend OUTSIDE the polar axes (right side, vertically centered)
-    axC.legend(
-        loc="center left",
-        bbox_to_anchor=(1.10, 0.5),
-        frameon=False,
-        fontsize=max(8, fontsize - 2),
-    )
+    if table_df is None or table_df.empty:
+        axD.set_title(
+            "D — Metrics table (no matching metrics found)", fontsize=fontsize
+        )
+    else:
+        axD.set_title("D — Replay & Prediction Metrics (mean±std)", fontsize=fontsize)
+        tbl = axD.table(
+            cellText=table_df.values, colLabels=table_df.columns, loc="center"
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(max(7, fontsize - 5))
+        tbl.scale(1.0, 1.2)
+        # bold header
+        for (r, c), cell in tbl.get_celld().items():
+            if r == 0:
+                cell.set_text_props(weight="bold")
 
     fig.suptitle(
-        f"Fig 3 — Traveling-wave & Polar (condition: {condition_dir.name}, run: {run_id})",
+        f"Fig 3 — Waves & Polar (cond: {cond.name}, run: {run_id})",
         fontsize=fontsize + 2,
     )
-
+    try:
+        fig.set_constrained_layout(True)
+    except Exception:
+        fig.tight_layout()
     if savepath:
         _savefig(fig, savepath)
     else:
         plt.show()
+    return fig
+
+
+# ==============================
+# Figure 4 helpers (checkpoints + cache + heatmap permutation)
+# ==============================
+
+
+def _list_checkpoints(run_dir: str):
+    pats = ["*.pth.tar", "*.pt", "*.ckpt"]
+    found = []
+    for p in pats:
+        found.extend(glob.glob(os.path.join(run_dir, p)))
+
+    def _key(path):
+        m = re.search(r"epoch[_\-]?(\d+)", os.path.basename(path))
+        return (0, int(m.group(1))) if m else (1, 10**12)
+
+    return sorted(found, key=_key)
+
+
+def _load_W_history_from_ckpt(ckpt_path: str):
+    try:
+        import torch
+
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+    except Exception as e:
+        print(f"[SKIP] fig4: failed to load ckpt {ckpt_path}: {e}")
+        return None, None
+    weights = ckpt.get("weights", {})
+    hist = weights.get("W_hh_history", None)
+    epochs = ckpt.get("snapshot_epochs", None)
+    if hist is None or epochs is None:
+        return None, None
+    Ws = []
+    for w in hist:
+        if hasattr(w, "detach"):
+            w = w.detach().cpu().numpy()
+        else:
+            w = np.asarray(w)
+        if w.ndim == 2 and w.shape[0] == w.shape[1]:
+            Ws.append(w)
+    if not Ws:
+        return None, None
+    return list(epochs), np.stack(Ws, axis=0)  # [T,H,H]
+
+
+def _select_time_indices_generic(times_list, spec: str):
+    if not times_list:
+        return []
+    want = [s.strip().lower() for s in (spec or "last").split(",")]
+    idxs, n = set(), len(times_list)
+    for w in want:
+        if w == "all":
+            return list(range(n))
+        if w == "first":
+            idxs.add(0)
+        elif w == "middle":
+            idxs.add(n // 2)
+        elif w == "last":
+            idxs.add(n - 1)
+        else:
+            try:
+                tnum = int(w)
+                if tnum in times_list:
+                    idxs.add(times_list.index(tnum))
+                else:
+                    arr = np.asarray(times_list, dtype=float)
+                    idxs.add(int(np.argmin(np.abs(arr - tnum))))
+            except Exception:
+                pass
+    return sorted(idxs)
+
+
+def _load_hidden_for_perm(run_dir: str):
+    # Prefer replay hidden, then prediction hidden
+    cands = []
+    cands.extend(glob.glob(os.path.join(run_dir, "*replay*hidden*.npy")))
+    cands.extend(glob.glob(os.path.join(run_dir, "*prediction*hidden*.npy")))
+    for f in sorted(cands):
+        try:
+            arr = np.load(f)
+            A = np.asarray(arr)
+            if A.ndim == 3:  # [B,T,N]
+                A = A[0]
+            if A.ndim == 2:
+                return A  # [T,N]
+        except Exception:
+            continue
+    return None
+
+
+def _peak_time_sort_perm(H_TN: np.ndarray):
+    H = (H_TN - H_TN.mean(axis=0, keepdims=True)) / (
+        H_TN.std(axis=0, keepdims=True) + 1e-8
+    )
+    peak_t = np.argmax(H, axis=0)  # [N]
+    return np.argsort(peak_t).astype(int)
+
+
+def _get_or_make_perm(run_dir: str):
+    cache_dir = os.path.join(run_dir, "analysis")
+    os.makedirs(cache_dir, exist_ok=True)
+    fperm = os.path.join(cache_dir, "perm_peak.npy")
+    if os.path.exists(fperm):
+        try:
+            p = np.load(fperm)
+            if p.ndim == 1:
+                return p.astype(int)
+        except Exception:
+            pass
+    H = _load_hidden_for_perm(run_dir)
+    if H is None:
+        print(
+            f"[WARN] fig4: no hidden traces found to compute permutation in {run_dir}; leaving W unsorted."
+        )
+        return None
+    perm = _peak_time_sort_perm(H)
+    np.save(fperm, perm)
+    return perm
+
+
+def _apply_perm(W: np.ndarray, perm: Optional[np.ndarray]):
+    return W if perm is None else W[np.ix_(perm, perm)]
+
+
+def _ensure_weight_cache(run_dir: str):
+    p = os.path.join(run_dir, "analysis", "weights")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def _find_or_make_sorted_W_snapshot(run_dir: str, epoch_val: int):
+    """
+    Returns path to cached sorted W for this run+epoch, creating it from checkpoint if needed.
+    Cache file: <run_dir>/analysis/weights/Wsorted_epoch{epoch:06d}.npy
+    """
+    cache_dir = _ensure_weight_cache(run_dir)
+    fout = os.path.join(cache_dir, f"Wsorted_epoch{int(epoch_val):06d}.npy")
+    if os.path.exists(fout):
+        return fout
+
+    ckpts = _list_checkpoints(run_dir)
+    if not ckpts:
+        print(f"[SKIP] fig4: no checkpoints in {run_dir}")
+        return None
+    epochs, Ws = None, None
+    for c in reversed(ckpts):  # latest first
+        epochs, Ws = _load_W_history_from_ckpt(c)
+        if epochs is not None:
+            break
+    if epochs is None:
+        print(f"[SKIP] fig4: no W_hh_history in checkpoints for {run_dir}")
+        return None
+
+    arr = np.asarray(epochs, dtype=float)
+    i = int(np.argmin(np.abs(arr - float(epoch_val))))
+    W = Ws[i]
+    perm = _get_or_make_perm(run_dir)
+    W_sorted = _apply_perm(W, perm)
+
+    try:
+        np.save(fout, W_sorted)
+    except Exception as e:
+        print(f"[WARN] fig4: failed to cache {fout}: {e}")
+    return fout
+
+
+# -----------------------------------------------------------
+# Figure 4 – Mean weight trace & eigenspectrum (per condition)
+# -----------------------------------------------------------
+
+
+def fig4_weights_and_spectrum_from_checkpoints(
+    condition_root: str,
+    time_spec: str = "last",
+    savepath: Optional[str] = None,
+    fontsize: int = 12,
+):
+    """
+    Rows = selected timepoints; Columns = [Trace mean±sd, Eigenspectrum].
+    Uses checkpoints as source of truth, applies SAME unit permutation as heatmaps
+    (peak-time on hidden activity), caches sorted W to analysis/weights/, and reuses cache.
+    Always overlays a faint eigenvalue cloud from individual runs.
+    """
+    run_dirs = sorted(glob.glob(os.path.join(condition_root, "run_*")))
+    if not run_dirs:
+        print("[SKIP] fig4: no run_* under", condition_root)
+        return None
+
+    # Discover epochs per run
+    per_run_epochs = {}
+    for rd in run_dirs:
+        ckpts = _list_checkpoints(rd)
+        epochs, Ws = (None, None)
+        for c in reversed(ckpts):
+            epochs, Ws = _load_W_history_from_ckpt(c)
+            if epochs is not None:
+                break
+        if epochs is None:
+            print(f"[SKIP] fig4: no W history in {rd}")
+            continue
+        per_run_epochs[rd] = list(epochs)
+    if not per_run_epochs:
+        print("[SKIP] fig4: no runs with W history in", condition_root)
+        return None
+
+    # Choose row indices using the first run as reference for labeling
+    ref_run = next(iter(per_run_epochs))
+    row_idxs = _select_time_indices_generic(per_run_epochs[ref_run], time_spec)
+    if not row_idxs:
+        print(
+            "[SKIP] fig4: time_spec matched nothing; available:",
+            per_run_epochs[ref_run],
+        )
+        return None
+
+    fig, axes = plt.subplots(len(row_idxs), 2, figsize=(11, 3.8 * len(row_idxs)))
+    if len(row_idxs) == 1:
+        axes = np.array([axes])
+    plt.rcParams.update({"font.size": fontsize})
+
+    for row_i, idx in enumerate(row_idxs):
+        epoch_label = (
+            per_run_epochs[ref_run][idx]
+            if idx < len(per_run_epochs[ref_run])
+            else f"idx{idx}"
+        )
+        axL, axR = axes[row_i, 0], axes[row_i, 1]
+
+        # Collect cached sorted W for each run at this row’s per-run index
+        Ws_sorted = []
+        for rd, epochs in per_run_epochs.items():
+            if not epochs:
+                continue
+            use_idx = idx if idx < len(epochs) else (len(epochs) - 1)
+            e = epochs[use_idx]
+            fW = _find_or_make_sorted_W_snapshot(rd, e)
+            if fW is None or not os.path.exists(fW):
+                continue
+            try:
+                W = np.load(fW)
+                if W.ndim == 2 and W.shape[0] == W.shape[1]:
+                    Ws_sorted.append(W)
+            except Exception:
+                continue
+
+        if not Ws_sorted:
+            print(f"[SKIP] fig4 row {row_i}: no sorted Ws for epoch ~{epoch_label}")
+            axL.axis("off")
+            axR.axis("off")
+            continue
+
+        Ws_sorted = np.stack(Ws_sorted, axis=0)  # [R,H,H]
+        Wm = Ws_sorted.mean(axis=0)
+
+        # Left: diagonal-offset trace mean ± sd
+        offs = np.arange(-(Wm.shape[0] - 1), Wm.shape[0], dtype=int)
+        traces = np.stack(
+            [
+                np.array([np.trace(Ws_sorted[r], k) for k in offs], dtype=float)
+                for r in range(Ws_sorted.shape[0])
+            ],
+            axis=0,
+        )  # [R,K]
+        tr_mean = traces.mean(axis=0)
+        tr_sd = (
+            traces.std(axis=0, ddof=1)
+            if traces.shape[0] > 1
+            else np.zeros_like(tr_mean)
+        )
+
+        axL.plot(offs, tr_mean, lw=2, label="mean")
+        if traces.shape[0] > 1:
+            axL.fill_between(
+                offs, tr_mean - tr_sd, tr_mean + tr_sd, alpha=0.2, label="±1 sd"
+            )
+        axL.axhline(0, ls="--", lw=1, alpha=0.6, color="k")
+        axL.axvline(0, ls=":", lw=1, alpha=0.6, color="k")
+        _style(
+            axL,
+            fontsize,
+            title=f"Trace (mean±sd) — epoch {epoch_label}",
+            xlabel="Diagonal offset k",
+            ylabel="∑ diag_k W",
+        )
+        axL.legend(frameon=False, fontsize=max(8, fontsize - 2))
+
+        # Right: eigenspectrum of mean(W_sorted) + faint per-run cloud (ALWAYS on)
+        eig_mean = np.linalg.eigvals(Wm)
+        evs = np.concatenate(
+            [np.linalg.eigvals(Ws_sorted[r]) for r in range(Ws_sorted.shape[0])]
+        )
+        axR.scatter(evs.real, evs.imag, s=6, alpha=0.12, label="runs")
+        axR.scatter(eig_mean.real, eig_mean.imag, s=10, alpha=0.9, label="mean(W)")
+        th = np.linspace(0, 2 * np.pi, 512)
+        axR.plot(
+            np.cos(th), np.sin(th), ls="--", lw=1, alpha=0.4, color="k", label="|λ|=1"
+        )
+        axR.axhline(0, color="k", lw=0.5)
+        axR.axvline(0, color="k", lw=0.5)
+        axR.set_aspect("equal", adjustable="box")
+        rho = float(np.max(np.abs(eig_mean))) if eig_mean.size else float("nan")
+        _style(
+            axR,
+            fontsize,
+            title=f"Eigenspectrum — epoch {epoch_label} (ρ≈{rho:.3f})",
+            xlabel="Re(λ)",
+            ylabel="Im(λ)",
+            legend=True,
+        )
+
+    try:
+        fig.set_constrained_layout(True)
+    except Exception:
+        fig.tight_layout()
+    if savepath:
+        _savefig(fig, savepath)
+    else:
+        plt.show()
+    return fig
 
 
 # ---------------------------
@@ -1022,6 +1645,12 @@ def parse_args(argv=None):
         default=None,
         help="Maximum value for color scale in Figure 3 heatmaps",
     )
+    p.add_argument(
+        "--fig4_time",
+        type=str,
+        default="last",
+        help="Figure 4 timepoint(s): first|middle|last|all or comma-list (e.g., 'first,last' or '100,500').",
+    )
 
     return p.parse_args(argv)
 
@@ -1092,17 +1721,35 @@ def main(argv=None):
             fontsize=args.fontsize,
         )
     if want(3):
-        cond_for_fig3 = cond_roots[0] if cond_roots else args.agg_dir
-        fig3_path = os.path.join(args.figdir, f"fig3_traveling_and_polar{suffix}.png")
-        fig3_traveling_wave_and_polar(
-            condition_dir=cond_for_fig3,
-            run_select="best_replay",
-            savepath=fig3_path,
-            fontsize=args.fontsize,
-            max_units=100,
-            vmin=args.vmin,
-            vmax=args.vmax,
-        )
+        roots = cond_roots if cond_roots else [args.agg_dir]
+        for root in roots:
+            fig3_path = os.path.join(
+                args.figdir, f"fig3_{_short_label_from_root(root)}{suffix}.png"
+            )
+            fig3_traveling_waves_and_replay(
+                condition_dir=root,
+                run_level_df=rl,
+                condition_summary_df=cs,
+                savepath=fig3_path,
+                fontsize=args.fontsize,
+                max_units=100,
+                vmin=args.vmin,
+                vmax=args.vmax,
+            )
+    if want(4):
+        roots = cond_roots if cond_roots else [args.agg_dir]
+        for root in roots:
+            short = _short_label_from_root(root)  # e.g., identity_n100_fro
+            per_suffix = f"_{args.figtag}_{short}" if args.figtag else f"_{short}"
+            fig4_path = os.path.join(
+                args.figdir, f"fig4_weights_and_spectrum{per_suffix}.png"
+            )
+            fig4_weights_and_spectrum_from_checkpoints(
+                condition_root=root,
+                time_spec=args.fig4_time,
+                savepath=fig4_path,
+                fontsize=args.fontsize,
+            )
 
 
 if __name__ == "__main__":

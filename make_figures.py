@@ -229,11 +229,14 @@ def _alpha_series_from_runlevel(df: pd.DataFrame):
 
 
 def _linestyle_map_for_alphas(alpha_vals):
-    """Stable map: sorted unique α0 -> a distinct linestyle."""
+    """Stable map: sorted unique α0 -> a distinct linestyle.
+    Always map 'no alpha' (None) to solid line.
+    """
     LINESTYLES_ORDER = ["-", "--", "-.", ":", (0, (1, 1))]
     levels = sorted(set(float(a) for a in alpha_vals if pd.notna(a)))
     ls = {a: LINESTYLES_ORDER[i % len(LINESTYLES_ORDER)] for i, a in enumerate(levels)}
-    return ls, levels
+    ls[None] = "-"  # ensure single-variant / no-α₀ conditions are solid
+    return ls, levels  # 'levels' excludes None, so the style legend only shows real α₀
 
 
 # ---------------------------

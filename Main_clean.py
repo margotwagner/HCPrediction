@@ -224,6 +224,16 @@ parser.add_argument(
     action="store_true",
     help="If set, use 'noisy' hidden-weight init base and save under ./runs/ElmanRNN/noisy/... (otherwise 'clean').",
 )
+parser.add_argument(
+    "--whh_path",
+    type=str,
+    default="",
+    help=(
+        "Path to a hidden-weight .npy (H×H). If set, overrides --whh_type/--whh_norm/--alpha "
+        "and outputs are saved under ./runs/ElmanRNN/<subdirs from whh_path>/"
+        "<filename_stem>..."
+    ),
+)
 
 
 def main():
@@ -231,6 +241,10 @@ def main():
     global args, f
 
     args = parser.parse_args()
+    if args.whh_path and args.whh_type != "none":
+        print(
+            "[whh] NOTE: --whh_path provided; overriding --whh_type/--whh_norm/--alpha"
+        )
     lr = args.lr
     n_epochs = args.epochs
     N = args.n
@@ -240,47 +254,73 @@ def main():
 
     # Auto-build savename if not provided, mirroring init structure
     if not args.savename:
-        if args.whh_type == "none":
-            # No override: keep it simple but structured
-            out_dir = os.path.join(
-                args.out_root, "ElmanRNN", _mode_dir(args.noisy), "random-init"
-            )
+        if args.whh_path:
+            # Mirror the provided hidden-weight path under ./runs/ElmanRNN/...
+            # Example:
+            # whh_path = ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/learned/random_n100/raw/random_n100_learned.npy
+            # out_dir  = ./runs/ElmanRNN/learned/random_n100/raw
+            # savename = ./runs/ElmanRNN/learned/random_n100/raw/random_n100_learned
+            from pathlib import Path
 
-            prefix = _prefix_from_type("none")  # "random"
-            fname_bits = [f"{prefix}_n{hidden_N}"]
-        else:
-            variant = _resolve_variant(args.whh_type)
-            norm_dir = args.whh_norm
-            out_dir = os.path.join(
-                args.out_root,
-                "ElmanRNN",
-                _mode_dir(args.noisy),
-                variant,
-                args.whh_type,
-                norm_dir,
-            )
-            if (
-                args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
-                and args.alpha is not None
-            ):
-                out_dir = os.path.join(out_dir, _alpha_tag(args.alpha))
-            prefix = _prefix_from_type(args.whh_type)
-            norm_short = _norm_shortname(args.whh_norm)
-            fname_bits = [f"{prefix}_n{hidden_N}_{norm_short}"]
-            if (
-                args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
-                and args.alpha is not None
-            ):
-                fname_bits.append(_alpha_tag(args.alpha))
-        suffix = _noisy_suffix(args.noisy)
-        if suffix:
-            fname_bits[-1] += suffix
-        if args.run_tag:
-            fname_bits.append(str(args.run_tag))
-        # make folder and set savename base (no extension)
-        if not args.savename:
+            p = Path(args.whh_path).resolve()
+            parts = list(p.parts)
+            stem = p.stem  # filename without extension
+
+            # Find "ElmanRNN" in the path and take everything after it (except the filename)
+            try:
+                idx = parts.index("ElmanRNN")
+                subdirs = parts[idx + 1 : -1]  # e.g., ["learned", "random_n100", "raw"]
+            except ValueError:
+                # Fallback: if "ElmanRNN" not present, just use no subdirs
+                subdirs = []
+
+            out_dir = os.path.join(args.out_root, "ElmanRNN", *subdirs)
             os.makedirs(out_dir, exist_ok=True)
-            args.savename = os.path.join(out_dir, "_".join(fname_bits))
+            args.savename = os.path.join(out_dir, stem)
+
+        else:
+            # ORIGINAL LOGIC (unchanged) for whh_type/whh_norm/alpha
+            if args.whh_type == "none":
+                out_dir = os.path.join(
+                    args.out_root, "ElmanRNN", _mode_dir(args.noisy), "random-init"
+                )
+                prefix = _prefix_from_type("none")  # "random"
+                fname_bits = [f"{prefix}_n{hidden_N}"]
+            else:
+                variant = _resolve_variant(args.whh_type)
+                norm_dir = args.whh_norm
+                out_dir = os.path.join(
+                    args.out_root,
+                    "ElmanRNN",
+                    _mode_dir(args.noisy),
+                    variant,
+                    args.whh_type,
+                    norm_dir,
+                )
+                if (
+                    args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
+                    and args.alpha is not None
+                ):
+                    out_dir = os.path.join(out_dir, _alpha_tag(args.alpha))
+                prefix = _prefix_from_type(args.whh_type)
+                norm_short = _norm_shortname(args.whh_norm)
+                fname_bits = [f"{prefix}_n{hidden_N}_{norm_short}"]
+                if (
+                    args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
+                    and args.alpha is not None
+                ):
+                    fname_bits.append(_alpha_tag(args.alpha))
+            suffix = _noisy_suffix(args.noisy)
+            if not args.whh_path and suffix:
+                fname_bits[-1] += suffix
+            if not args.whh_path and args.run_tag:
+                fname_bits.append(str(args.run_tag))
+            if not args.whh_path and not args.savename:
+                os.makedirs(out_dir, exist_ok=True)
+                args.savename = os.path.join(out_dir, "_".join(fname_bits))
+
+        if args.run_tag:
+            args.savename += f"_{args.run_tag}"
 
     # -----------------
     # Load training data
@@ -308,7 +348,21 @@ def main():
     net = ElmanRNN_pytorch_module_v2(N, hidden_N, N)
 
     # --- override hidden weight from disk ---
-    if args.whh_type != "none":
+    if args.whh_path:
+        try:
+            log(f"[whh] loading hidden weight from (explicit path): {args.whh_path}")
+            # sanity check on shape
+            W = np.load(args.whh_path)
+            if W.shape != (hidden_N, hidden_N):
+                raise ValueError(
+                    f"Hidden weight shape mismatch: expected ({hidden_N},{hidden_N}), got {W.shape}"
+                )
+            _load_hidden_into_elman(
+                net, args.whh_path, device=net.rnn.weight_hh_l0.device
+            )
+        except Exception as e:
+            log(f"[whh] WARNING: failed to load init from whh_path: {e}")
+    elif args.whh_type != "none":
         try:
             path = _resolve_hidden_path(
                 hidden_N, args.whh_type, args.whh_norm, args.alpha, noisy=args.noisy
@@ -445,8 +499,24 @@ def main():
         # ---------------------
         net = ElmanRNN_pytorch_module_v2(N, hidden_N, N)
 
-        # --- override hidden weight from disk (if any) ---
-        if args.whh_type != "none":
+        # --- override hidden weight from disk ---
+        if args.whh_path:
+            try:
+                log(
+                    f"[whh] loading hidden weight from (explicit path): {args.whh_path}"
+                )
+                # sanity check on shape
+                W = np.load(args.whh_path)
+                if W.shape != (hidden_N, hidden_N):
+                    raise ValueError(
+                        f"Hidden weight shape mismatch: expected ({hidden_N},{hidden_N}), got {W.shape}"
+                    )
+                _load_hidden_into_elman(
+                    net, args.whh_path, device=net.rnn.weight_hh_l0.device
+                )
+            except Exception as e:
+                log(f"[whh] WARNING: failed to load init from whh_path: {e}")
+        elif args.whh_type != "none":
             try:
                 path = _resolve_hidden_path(
                     hidden_N, args.whh_type, args.whh_norm, args.alpha, noisy=args.noisy

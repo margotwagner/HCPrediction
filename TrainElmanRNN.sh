@@ -19,3 +19,8 @@ python Main_clean.py \
 
 
 #python Main_clean.py --input data/Ns200_SeqN100_1.pth.tar --ae 1 --fixi 2 #--fixo 2 --pred 1 --rnn_act relu --ac_output sigmoid --epoch 100000 --savename #Elman_SGD/Remap_predloss/N200T100_relu_fixio/pred_relu
+
+python Main_clean.py \
+  --input ./data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar \
+  --n 100 --hidden-n 100 --epochs 100000 \
+  --whh_path ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/learned/identity_n100/frobenius/identity_n100_fro_learned.npy --num_runs 3

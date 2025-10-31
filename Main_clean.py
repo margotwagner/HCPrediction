@@ -319,9 +319,6 @@ def main():
                 os.makedirs(out_dir, exist_ok=True)
                 args.savename = os.path.join(out_dir, "_".join(fname_bits))
 
-        if args.run_tag:
-            args.savename += f"_{args.run_tag}"
-
     # -----------------
     # Load training data
     # -----------------

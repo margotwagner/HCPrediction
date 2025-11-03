@@ -106,7 +106,7 @@ parser.add_argument(
     "--fixi",
     default=0,
     type=int,
-    help="Fix input matrix (rnn.weight_ih_l0) with various modes (1,2,3-> see code)",
+    help="Fix input matrix with modes: 0=off, 1=positive constant, 2=freeze init, 3=abs-fold nonnegative, 4=identity (frozen, zero bias)",
 )
 parser.add_argument(
     "--fixw",
@@ -136,10 +136,10 @@ parser.add_argument(
     help="If >0, clip total gradient norm to this value each step.",
 )
 parser.add_argument(
-    "--nobias",
+    "--nobias_hh",
     default=0,
     type=int,
-    help="whether to remove all bias term in RNN module",
+    help="whether to remove bias term from hidden-hidden in RNN module",
 )
 parser.add_argument(
     "--rnn_act",
@@ -279,7 +279,6 @@ def main():
             args.savename = os.path.join(out_dir, stem)
 
         else:
-            # ORIGINAL LOGIC (unchanged) for whh_type/whh_norm/alpha
             if args.whh_type == "none":
                 out_dir = os.path.join(
                     args.out_root, "ElmanRNN", _mode_dir(args.noisy), "random-init"
@@ -337,129 +336,6 @@ def main():
         X_mini = X_mini[:, :-1, :]
         Target_mini = Target_mini[:, 1:, :]
         log("Predicting one-step ahead")
-
-    # ---------------------
-    # Define the network
-    # ---------------------
-    # ElmanRNN_pytorch_module_v2: (input_dim=N, hidden_dim=hidden_N, output_dim=N)
-    net = ElmanRNN_pytorch_module_v2(N, hidden_N, N)
-
-    # --- override hidden weight from disk ---
-    if args.whh_path:
-        try:
-            log(f"[whh] loading hidden weight from (explicit path): {args.whh_path}")
-            # sanity check on shape
-            W = np.load(args.whh_path)
-            if W.shape != (hidden_N, hidden_N):
-                raise ValueError(
-                    f"Hidden weight shape mismatch: expected ({hidden_N},{hidden_N}), got {W.shape}"
-                )
-            _load_hidden_into_elman(
-                net, args.whh_path, device=net.rnn.weight_hh_l0.device
-            )
-        except Exception as e:
-            log(f"[whh] WARNING: failed to load init from whh_path: {e}")
-    elif args.whh_type != "none":
-        try:
-            path = _resolve_hidden_path(
-                hidden_N, args.whh_type, args.whh_norm, args.alpha, noisy=args.noisy
-            )
-            log(f"[whh] loading hidden weight from: {path}")
-            _load_hidden_into_elman(net, path, device=net.rnn.weight_hh_l0.device)
-        except Exception as e:
-            log(f"[whh] WARNING: failed to load init: {e}")
-    else:
-        log("[whh] using default random init")
-
-    # Cache initial recurrent matrix (after any override)
-    W0 = net.rnn.weight_hh_l0.detach().cpu().numpy()
-
-    # Optionally change the RNN hidden nonlinearity
-    if args.rnn_act == "relu":
-        net.rnn = nn.RNN(N, hidden_N, 1, batch_first=True, nonlinearity="relu")
-        log("RNN nonlinearity: elementwise relu")
-
-    # Optionally override output activation
-    if args.ac_output == "tanh":
-        net.act = nn.Tanh()
-        log("Change output activation function to tanh")
-    elif args.ac_output == "relu":
-        net.act = nn.ReLU()
-        log("Change output activation function to relu")
-    elif args.ac_output == "sigmoid":
-        net.act = nn.Sigmoid()
-        log("Change output activation function to sigmoid")
-
-    # ------------------------------
-    # Optional parameter constraints
-    # ------------------------------
-    # Remove hidden bias entirely (zero + freeze)
-    if args.nobias:
-        for name, p in net.named_parameters():
-            if name == "rnn.bias_hh_l0":
-                p.requires_grad = False
-                p.data.fill_(0)
-                log("Fixing RNN bias to 0")
-
-    # Fix input matrix with different modes and freeze it
-    if args.fixi:
-        for name, p in net.named_parameters():
-            if name == "rnn.weight_ih_l0":
-                if args.fixi == 1:
-                    # Positive constant matrix (uniform average)
-                    p.data = torch.ones(p.shape) / (p.shape[0] * p.shape[1])
-                    log("Fixing {} to positive constant".format(name))
-                elif args.fixi == 2:
-                    # Preserve initialization but freeze it
-                    log("Fixing {} to initialization".format(name))
-                elif args.fixi == 3:
-                    # Make current init nonegative by folding absolute values
-                    p.data = p.data + torch.abs(p.data)
-                    log("Fixing {} to positive initiation".format(name))
-
-                p.requires_grad = False
-
-    # Fix output matrix with different modes and freeze it
-    if args.fixo:
-        for name, p in net.named_parameters():
-            if name == "linear.weight":
-                if args.fixo == 1:
-                    p.data = torch.ones(p.shape) / (p.shape[0] * p.shape[1])
-                    log("Fixing {} to positive constant".format(name))
-                elif args.fixo == 2:
-                    log("Fixing {} to initialization".format(name))
-                elif args.fixo == 3:
-                    p.data = p.data + torch.abs(p.data)
-                    log("Fixing {} to positive initiation".format(name))
-                p.requires_grad = False
-
-    # Fix recurrent weight and its bias (freeze both)
-    if args.fixw:
-        for name, p in net.named_parameters():
-            if name == "rnn.weight_hh_l0":
-                p.requires_grad = False
-                # Random in [-1/sqrt(N), 1/sqrt(N)] (Elman-ish scale)
-                p.data = torch.rand(p.data.shape) * 2 * 1 / np.sqrt(N) - 1 / np.sqrt(N)
-                log("Fixing recurrent matrix to a random matrix")
-            elif name == "rnn.bias_hh_l0":
-                p.requires_grad = False
-                p.data.fill_(0)
-                log("Fixing recurrent bias to 0")
-
-    # ------------------
-    # Loss & checkpoint
-    # ------------------
-    criterion = nn.MSELoss(reduction="mean")  # mean MSE across batch/time/features
-
-    # Optionally resume model weights from a checkpoint(.pth.tar)
-    if args.resume:
-        if os.path.isfile(args.resume):
-            log("=> loading previous network '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume)
-            net.load_state_dict(checkpoint["state_dict"])
-            log("=> loaded previous network '{}' ".format(args.resume))
-        else:
-            log("=> no checkpoint found at '{}'".format(args.resume))
 
     # -----------------------
     # Initial hidden state h0
@@ -547,25 +423,47 @@ def main():
         # ------------------------------
         # Optional parameter constraints
         # ------------------------------
-        if args.nobias:
+        if args.nobias_hh:
             for name, p in net.named_parameters():
                 if name == "rnn.bias_hh_l0":
                     p.requires_grad = False
                     p.data.fill_(0)
-                    log("Fixing RNN bias to 0")
+                    log("Fixing RNN hidden-hidden bias to 0")
 
         if args.fixi:
             for name, p in net.named_parameters():
                 if name == "rnn.weight_ih_l0":
                     if args.fixi == 1:
+                        # Positive constant matrix (uniform average)
                         p.data = torch.ones(p.shape) / (p.shape[0] * p.shape[1])
                         log("Fixing {} to positive constant".format(name))
                     elif args.fixi == 2:
+                        # Preserve initialization but freeze it
                         log("Fixing {} to initialization".format(name))
                     elif args.fixi == 3:
+                        # Make current init nonegative by folding absolute values
                         p.data = p.data + torch.abs(p.data)
                         log("Fixing {} to positive initiation".format(name))
-                    p.requires_grad = False
+                    elif args.fixi == 4:
+                        # identity (rectangular eye) and freeze
+                        H, N_in = p.shape  # (hidden, input)
+                        eye = torch.eye(H, N_in, device=p.device, dtype=p.dtype)
+                        with torch.no_grad():
+                            p.copy_(eye)
+                        p.requires_grad_(False)
+                        log("[fixi] set {} to identity and froze it".format(name))
+
+                        # Also zero & freeze the input→hidden bias to preserve pure identity mapping
+                        if (
+                            hasattr(net.rnn, "bias_ih_l0")
+                            and net.rnn.bias_ih_l0 is not None
+                        ):
+                            with torch.no_grad():
+                                net.rnn.bias_ih_l0.zero_()
+                            net.rnn.bias_ih_l0.requires_grad_(False)
+                            log(
+                                "[fixi] zeroed & froze rnn.bias_ih_l0 for pure identity input mapping"
+                            )
 
         if args.fixo:
             for name, p in net.named_parameters():
@@ -611,9 +509,7 @@ def main():
         # Move to device
         # -----------------------
         if args.gpu:
-            print(
-                "Cuda device availability: {}".format(torch.cuda.is_available()), file=f
-            )
+            log("Cuda device availability: {}".format(torch.cuda.is_available()))
             criterion = criterion.cuda()
             net = net.cuda()
             X_mini = X_mini.cuda()

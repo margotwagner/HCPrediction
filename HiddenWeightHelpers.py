@@ -259,6 +259,44 @@ def plot_sym_asym(W: np.ndarray, base_title: str = "W"):
     plot_weight_all(W_skew, title=f"{base_title} (skew / asymmetric)")
 
 
+# --- Mixing-ratio (sym vs skew) utilities ------------------------------------
+import numpy as np
+
+
+def compute_alpha_mixing_ratio(W: np.ndarray) -> float:
+    """
+    Return α in [0,1] measuring symmetric vs skew content:
+      α = ||S||_F / (||S||_F + ||K||_F),  S = 0.5*(W+W^T), K = 0.5*(W-W^T)
+    α=1: purely symmetric; α=0: purely skew.
+    """
+    S = 0.5 * (W + W.T)
+    K = 0.5 * (W - W.T)
+    s = float(np.linalg.norm(S))
+    k = float(np.linalg.norm(K))
+    denom = s + k
+    return (s / denom) if denom > 0 else 0.0
+
+
+def mix_sym_skew_to_alpha(
+    W: np.ndarray, alpha: float, renorm_to: Optional[float] = None
+) -> np.ndarray:
+    """
+    Force initial mixing ratio alpha in [0,1] by combining symmetric and skew parts:
+      W_sym = 0.5*(W + W.T)
+      W_skew = 0.5*(W - W.T)
+      W_mix = alpha * W_sym + (1 - alpha) * W_skew
+    Optionally Frobenius-renormalize to 'renorm_to' (e.g., ||W||_F of the base).
+    """
+    W_sym = 0.5 * (W + W.T)
+    W_skew = 0.5 * (W - W.T)
+    W_mix = alpha * W_sym + (1.0 - alpha) * W_skew
+    if renorm_to is not None:
+        f = float(np.linalg.norm(W_mix))
+        if f > 0:
+            W_mix = (renorm_to / f) * W_mix
+    return W_mix.astype(np.float32)
+
+
 # ---------- Model helpers (PyTorch Elman) ----------
 
 

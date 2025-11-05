@@ -52,3 +52,28 @@ python make_figures.py --just 1 \
 python make_figures.py --just 1 \
 --conditions "$conds_csv" \
 --figdir ./figs/fig1 --figtag loglog_id_noisy --fig1_logxA --fig1_logxB --fig1_logyA --fig1_logyB
+
+
+
+# Pretrained
+conditions=(
+  "./runs/ElmanRNN/randomih/random-init/random_n100"
+  "./runs/ElmanRNN/randomih/shift-variants/identity/frobenius/identity_n100_fro"
+  #"./runs/ElmanRNN/randomih/learned/random_n100/frobenius/random_n100_fro_learned"
+  #"./runs/ElmanRNN/randomih/learned/random_n100/raw/random_n100_learned"
+  "./runs/ElmanRNN/randomih/learned/identity_n100/frobenius/identity_n100_fro_learned"
+  "./runs/ElmanRNN/randomih/learned/identity_n100/raw/identity_n100_learned"
+  #"./runs/ElmanRNN/randomih/learned/sorted/random_n100/frobenius/random_n100_fro_learned_sorted"
+  #"./runs/ElmanRNN/randomih/learned/sorted/random_n100/raw/random_n100_learned_sorted"
+  "./runs/ElmanRNN/randomih/learned/sorted/identity_n100/frobenius/identity_n100_fro_learned_sorted"
+  "./runs/ElmanRNN/randomih/learned/sorted/identity_n100/raw/identity_n100_learned_sorted"
+)
+IFS=, conds_csv="${conditions[*]}"; unset IFS
+
+python make_figures.py --just 1 \
+  --conditions "$conds_csv" \
+  --figdir ./figs/fig1 --figtag raw_pretrained
+
+python make_figures.py --just 1 \
+  --conditions "$conds_csv" \
+  --figdir ./figs/fig1 --figtag loglog_pretrained --fig1_logxA --fig1_logxB --fig1_logyA --fig1_logyB

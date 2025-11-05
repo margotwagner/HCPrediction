@@ -68,24 +68,24 @@ nohup python Main_clean.py \
   --ae 1 --fixi 4 --fixo 2 --pred 1 \
   --n 100 --hidden-n 100 --ac_output sigmoid \
   --epochs 100000 \
-  --whh_type none \
-  --savename ./runs/ElmanRNN/identityih/random-init/random_n100 \
-  --num_runs 3 > ./logs/identityih/random_n100.out 2>&1 &
+  --whh_path ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/clean/random/random_baseline.npy \
+  --savename ./runs/ElmanRNN/identityih/random_baseline \
+  --num_runs 3 > ./logs/identityih/random_baseline.out 2>&1 &
 
 nohup python Main_clean.py \
   --input ./data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar \
   --ae 1 --fixi 4 --fixo 2 --pred 1 \
   --n 100 --hidden-n 100 --ac_output sigmoid \
   --epochs 100000 \
-  --whh_type identity --whh_norm frobenius \
-  --savename ./runs/ElmanRNN/identityih/shift-variants/identity/frobenius/identity_n100_fro \
-  --num_runs 3 > ./logs/identityih/identity_n100_fro.out 2>&1 &
+  --whh_path ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/clean/mh-variants/cyc-centered/cyccentmh.npy \
+  --savename ./runs/ElmanRNN/identityih/mh-variants/cyc-centered \
+  --num_runs 3 > ./logs/identityih/cyc-centered.out 2>&1 &
 
 nohup python Main_clean.py \
   --input ./data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar \
   --ae 1 --fixi 4 --fixo 2 --pred 1 \
   --n 100 --hidden-n 100 --ac_output sigmoid \
   --epochs 100000 \
-  --whh_type shift --whh_norm frobenius --alpha 0.0 \
-  --savename ./runs/ElmanRNN/identityih/shift-variants/shift/frobenius/sym0p00/shift_n100_fro_sym0p00 \
-  --num_runs 3 > ./logs/identityih/shift_n100_fro_sym0p00.out 2>&1 &
+  --whh_path ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/clean/mh-variants/shifted/sym1p00/shiftmh_sym1p00.npy \
+  --savename ./runs/ElmanRNN/identityih/mh-variants/shifted/sym1p00/shiftmh_sym1p00 \
+  --num_runs 3 > ./logs/identityih/shiftmh_sym1p00.out 2>&1 &

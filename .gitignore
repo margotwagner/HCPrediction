@@ -7,3 +7,5 @@ SymAsymRNN
 runs
 runs_eval
 figs*
+*.out
+logs

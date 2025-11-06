@@ -297,6 +297,38 @@ def mix_sym_skew_to_alpha(
     return W_mix.astype(np.float32)
 
 
+# ---------- Circulant wrap-around-diagonal test ----------
+def is_circulant_wrapdiag(
+    W: np.ndarray, tol: float = 1e-6, verbose: bool = False
+) -> bool:
+    """
+    Direct test of the defining property of circulant matrices:
+      For each offset k, all entries on the wrap-around diagonal
+      D_k = { W[i, (i+k) mod n] }_i are (approximately) equal.
+
+    Returns True iff max deviation on every D_k <= tol.
+    Works for real or complex W. O(n^2) time, no projections or FFTs.
+    """
+    if W.ndim != 2 or W.shape[0] != W.shape[1]:
+        raise ValueError("is_circulant_wrapdiag: W must be a square 2D array")
+    n = W.shape[0]
+    idx = np.arange(n)
+    for k in range(n):
+        vals = W[idx, (idx + k) % n]
+        # compare against the first element on this diagonal; avoids building means, keeps it strict
+        deviation = np.max(np.abs(vals - vals[0]))
+        if verbose:
+            print("k={:2d}  max_dev={:.3e}".format(k, float(deviation)))
+        if float(deviation) > tol:
+            return False
+    return True
+
+
+# Optional convenience alias so your other code can just call is_circulant(...)
+def is_circulant(W: np.ndarray, tol: float = 1e-6, verbose: bool = False) -> bool:
+    return is_circulant_wrapdiag(W, tol=tol, verbose=verbose)
+
+
 # ---------- Model helpers (PyTorch Elman) ----------
 
 

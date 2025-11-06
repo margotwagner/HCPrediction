@@ -86,6 +86,6 @@ nohup python Main_clean.py \
   --ae 1 --fixi 4 --fixo 2 --pred 1 \
   --n 100 --hidden-n 100 --ac_output sigmoid \
   --epochs 100000 \
-  --whh_path ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/clean/mh-variants/shifted/sym1p00/shiftmh_sym1p00.npy \
-  --savename ./runs/ElmanRNN/identityih/mh-variants/shifted/sym1p00/shiftmh_sym1p00 \
-  --num_runs 3 > ./logs/identityih/shiftmh_sym1p00.out 2>&1 &
+  --whh_path ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/clean/shift-variants/cyc-shift/sym1p00/cycshift_sym1p00.npy \
+  --savename ./runs/ElmanRNN/identityih/shift-variants/cyc-shift/sym1p00/cycshift_sym1p00 \
+  --num_runs 7 > ./logs/identityih/cycshift_sym1p00.out 2>&1 &

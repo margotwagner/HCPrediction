@@ -70,16 +70,16 @@ nohup python Main_clean.py \
   --epochs 100000 \
   --whh_path ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/clean/random/random_baseline.npy \
   --savename ./runs/ElmanRNN/identityih/random_baseline \
-  --num_runs 3 > ./logs/identityih/random_baseline.out 2>&1 &
+  --num_runs 7 > ./logs/identityih/random_baseline.out 2>&1 &
 
 nohup python Main_clean.py \
   --input ./data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar \
   --ae 1 --fixi 4 --fixo 2 --pred 1 \
   --n 100 --hidden-n 100 --ac_output sigmoid \
   --epochs 100000 \
-  --whh_path ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/clean/mh-variants/cyc-centered/cyccentmh.npy \
-  --savename ./runs/ElmanRNN/identityih/mh-variants/cyc-centered \
-  --num_runs 3 > ./logs/identityih/cyc-centered.out 2>&1 &
+  --whh_path ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/clean/shift-variants/identity/identity.npy \
+  --savename ./runs/ElmanRNN/identityih/shift-variants/identity \
+  --num_runs 7 > ./logs/identityih/identity.out 2>&1 &
 
 nohup python Main_clean.py \
   --input ./data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar \

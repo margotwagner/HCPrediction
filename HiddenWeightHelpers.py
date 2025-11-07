@@ -329,6 +329,58 @@ def is_circulant(W: np.ndarray, tol: float = 1e-6, verbose: bool = False) -> boo
     return is_circulant_wrapdiag(W, tol=tol, verbose=verbose)
 
 
+# ---------- Circulant helpers: first-row extract/save/rebuild ----------
+
+
+def extract_first_row(W: np.ndarray) -> np.ndarray:
+    """
+    Return row0 (H,) float32 from an (H,H) weight matrix.
+    """
+    W = np.asarray(W)
+    if W.ndim != 2 or W.shape[0] != W.shape[1]:
+        raise ValueError("W must be square (H,H).")
+    return W[0, :].astype(np.float32, copy=True)
+
+
+def save_first_row(
+    row0: np.ndarray, save_dir: str, name: str, meta: dict = None
+) -> None:
+    """
+    Save the first row as .npy and a small .json sidecar with stats.
+    Naming mirrors save_matrix() style but for a vector.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    base = os.path.join(save_dir, name)
+    row0 = np.asarray(row0).astype(np.float32)
+    np.save(base + ".npy", row0)
+
+    # basic meta (aligns with your helpers' style)
+    m = {
+        "length": int(row0.shape[0]),
+        "mean": float(row0.mean()),
+        "var": float(((row0 - float(row0.mean())) ** 2).mean()),
+        "l2_norm": float(np.linalg.norm(row0)),
+        "type": "first_row",
+    }
+    if meta:
+        m.update(meta)
+    with open(base + ".json", "w") as f:
+        json.dump(m, f, indent=2)
+    print("Saved:", base + ".npy", "and", base + ".json")
+
+
+def extract_and_optionally_save_first_row(
+    W: np.ndarray, save_dir: str = None, name: str = None, meta: dict = None
+) -> np.ndarray:
+    """
+    Convenience wrapper: get row0 and (optionally) save it.
+    """
+    row0 = extract_first_row(W)
+    if save_dir is not None and name is not None:
+        save_first_row(row0, save_dir, name, meta=meta)
+    return row0
+
+
 # ---------- Model helpers (PyTorch Elman) ----------
 
 

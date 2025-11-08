@@ -27,7 +27,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-from RNN_Class import *
+from ElmanRNN import *
 from tqdm import tqdm
 import random
 from typing import Optional
@@ -148,7 +148,7 @@ parser.add_argument(
     help="Hidden nonlinearity: 'relu' to override (default tanh)",
 )
 parser.add_argument(
-    "--ac_output",
+    "--act_output",
     default="",
     type=str,
     help="Output activation override: tanh|relu|sigmoid (default softmax along dim=2 in class)",
@@ -233,6 +233,17 @@ parser.add_argument(
         "and outputs are saved under ./runs/ElmanRNN/<subdirs from whh_path>/"
         "<filename_stem>..."
     ),
+)
+parser.add_argument(
+    "--enforce_circulant",
+    action="store_true",
+    help="If set, replace RNN recurrence with a circulant (circular-convolution) parameterization.",
+)
+parser.add_argument(
+    "--row0",
+    type=str,
+    default="",
+    help="Path to a .npy file containing the first row (length H or shorter band) for initializing the circulant kernel.",
 )
 
 
@@ -370,54 +381,83 @@ def main():
         # ---------------------
         # Define the network
         # ---------------------
-        net = ElmanRNN_pytorch_module_v2(N, hidden_N, N)
+        if args.enforce_circulant:
+            # New circulant-parameterized Elman (defined in RNN_Class.py below)
+            net = ElmanRNN_circulant(
+                input_dim=N,
+                hidden_dim=hidden_N,
+                output_dim=N,
+                rnn_act=("relu" if args.rnn_act == "relu" else "tanh"),  # default tanh
+            )
 
-        # --- override hidden weight from disk ---
-        if args.whh_path:
-            try:
-                log(
-                    f"[whh] loading hidden weight from (explicit path): {args.whh_path}"
+            # Optional: initialize from --row0
+            if args.row0:
+                row0 = np.load(args.row0).astype(np.float32).reshape(-1)
+                tol = 1e-8  # same as you pass into init_from_row0
+                nnz = int(np.count_nonzero(np.abs(row0) > tol))
+                print(
+                    f"[row0] len={row0.size}, nnz>(tol)={nnz}, min={row0.min():.2e}, max={row0.max():.2e}"
                 )
-                # sanity check on shape
-                W = np.load(args.whh_path)
-                if W.shape != (hidden_N, hidden_N):
-                    raise ValueError(
-                        f"Hidden weight shape mismatch: expected ({hidden_N},{hidden_N}), got {W.shape}"
-                    )
-                _load_hidden_into_elman(
-                    net, args.whh_path, device=net.rnn.weight_hh_l0.device
-                )
-            except Exception as e:
-                log(f"[whh] WARNING: failed to load init from whh_path: {e}")
-        elif args.whh_type != "none":
-            try:
-                path = _resolve_hidden_path(
-                    hidden_N, args.whh_type, args.whh_norm, args.alpha, noisy=args.noisy
-                )
-                log(f"[whh] loading hidden weight from: {path}")
-                _load_hidden_into_elman(net, path, device=net.rnn.weight_hh_l0.device)
-            except Exception as e:
-                log(f"[whh] WARNING: failed to load init: {e}")
+                net.hh_circ.init_from_row0(row0)
+
+            # Log K exactly once (now net definitely exists and is circulant)
+            K0 = int(net.hh_circ.conv.kernel_size[0])
+            log(f"[circ] kernel_size K={K0} (band density K/H={K0/hidden_N:.3f})")
+            net._kernel_K0 = K0  # stash for checkpoint
+
         else:
-            log("[whh] using default random init")
+            # Old path: keep your existing model
+            net = ElmanRNN_pytorch_module_v2(
+                N, hidden_N, N, rnn_act=("relu" if args.rnn_act == "relu" else "tanh")
+            )
+
+            # --- override hidden weight from disk ---
+            if args.whh_path:
+                try:
+                    log(
+                        f"[whh] loading hidden weight from (explicit path): {args.whh_path}"
+                    )
+                    # sanity check on shape
+                    W = np.load(args.whh_path)
+                    if W.shape != (hidden_N, hidden_N):
+                        raise ValueError(
+                            f"Hidden weight shape mismatch: expected ({hidden_N},{hidden_N}), got {W.shape}"
+                        )
+                    _load_hidden_into_elman(
+                        net, args.whh_path, device=net.rnn.weight_hh_l0.device
+                    )
+                except Exception as e:
+                    log(f"[whh] WARNING: failed to load init from whh_path: {e}")
+            elif args.whh_type != "none":
+                try:
+                    path = _resolve_hidden_path(
+                        hidden_N,
+                        args.whh_type,
+                        args.whh_norm,
+                        args.alpha,
+                        noisy=args.noisy,
+                    )
+                    log(f"[whh] loading hidden weight from: {path}")
+                    _load_hidden_into_elman(
+                        net, path, device=net.rnn.weight_hh_l0.device
+                    )
+                except Exception as e:
+                    log(f"[whh] WARNING: failed to load init: {e}")
+            else:
+                log("[whh] using default random init")
 
         # Cache initial recurrent matrix (after any override)
-        W0 = net.rnn.weight_hh_l0.detach().cpu().numpy()
-
-        # Optionally change the RNN hidden nonlinearity
-        if args.rnn_act == "relu":
-            net.rnn = nn.RNN(N, hidden_N, 1, batch_first=True, nonlinearity="relu")
-            log("RNN nonlinearity: elementwise relu")
+        W0 = _export_dense_Whh(net).detach().cpu().numpy()
 
         # Optionally override output activation
-        if args.ac_output == "tanh":
-            net.act = nn.Tanh()
+        if args.act_output == "tanh":
+            net.act_output = nn.Tanh()
             log("Change output activation function to tanh")
-        elif args.ac_output == "relu":
-            net.act = nn.ReLU()
+        elif args.act_output == "relu":
+            net.act_output = nn.ReLU()
             log("Change output activation function to relu")
-        elif args.ac_output == "sigmoid":
-            net.act = nn.Sigmoid()
+        elif args.act_output == "sigmoid":
+            net.act_output = nn.Sigmoid()
             log("Change output activation function to sigmoid")
 
         # ------------------------------
@@ -647,6 +687,14 @@ def main():
             save_dict["Mask_W"] = Mask_W
             save_dict["Mask_B"] = Mask_B
 
+        # Persist K in the checkpoint summary
+        if hasattr(net, "_kernel_K0"):
+            save_dict.setdefault("circulant", {})
+            save_dict["circulant"]["kernel_K"] = int(net._kernel_K0)
+            save_dict["circulant"]["kernel_band_density"] = float(
+                net._kernel_K0 / hidden_N
+            )
+
         torch.save(save_dict, savename_run + ".pth.tar")
         f.close()
         f = None  # close log file
@@ -857,7 +905,9 @@ def train_partial(
                 wstruct = _weight_structure_metrics(net, W0=W0)
                 weight_structure_history.append({"epoch": int(epoch), **wstruct})
                 # --- Save raw W_hh for offline analysis (compact float16) ---
-                W_snap = net.rnn.weight_hh_l0.detach().cpu().numpy().astype(np.float16)
+                W_snap = (
+                    _export_dense_Whh(net).detach().cpu().numpy().astype(np.float16)
+                )
                 W_hh_history.append(W_snap)
                 print("Epoch: {}/{}.............".format(epoch, n_epochs), end=" ")
                 print("Loss: {:.4f}".format(loss.item()))
@@ -1165,7 +1215,7 @@ def _weight_structure_metrics(net, W0=None):
     Summarize symmetry/asymmetry and non-normality of W_hh.
     If W0 is provided (numpy array), also report Frobenius drift and relative drift.
     """
-    W = net.rnn.weight_hh_l0.detach().float().cpu().numpy()
+    W = _export_dense_Whh(net).detach().float().cpu().numpy()
     S = 0.5 * (W + W.T)
     A = 0.5 * (W - W.T)
 
@@ -1422,6 +1472,36 @@ def log(*args, sep=" ", end="\n"):
     else:
         # fallback to stdout if no run log open yet
         print(msg, end="")
+
+
+def _export_dense_Whh(net: nn.Module) -> torch.Tensor:
+    """
+    Return a dense HxH torch.Tensor for the current hidden->hidden operator,
+    regardless of backend (classic nn.RNN or circulant-via-Conv1d).
+    """
+    # Circulant backend: rebuild circulant from kernel in net.hh_circ
+    if hasattr(net, "hh_circ") and hasattr(net.hh_circ, "conv"):
+        # infer H and grab kernel (note: Conv1d stores 'flipped' kernel for correlation)
+        if hasattr(net, "hidden_dim"):
+            H = int(net.hidden_dim)
+        else:
+            # fallback: use output_linear.in_features if present
+            H = int(net.output_linear.in_features)
+        K = int(net.hh_circ.conv.kernel_size[0])
+        # unflip back to convolution kernel
+        w = torch.flip(net.hh_circ.conv.weight[0, 0, :K].detach(), dims=[0])  # (K,)
+        # zero-pad to length H (first row = [w[0:K], zeros])
+        w_full = torch.zeros(H, dtype=w.dtype, device=w.device)
+        w_full[:K] = w
+        # build circulant by rolling the first row
+        rows = [w_full.roll(shifts=i, dims=0) for i in range(H)]
+        return torch.stack(rows, dim=0)
+
+    # Dense Elman (nn.RNN)
+    if hasattr(net, "rnn") and hasattr(net.rnn, "weight_hh_l0"):
+        return net.rnn.weight_hh_l0.detach().clone()
+
+    raise AttributeError("No supported hidden->hidden weight found on this model.")
 
 
 if __name__ == "__main__":

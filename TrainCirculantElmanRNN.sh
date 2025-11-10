@@ -4,9 +4,10 @@ nohup python Main_clean.py \
   --n 100 --hidden-n 100 --act_output sigmoid \
   --enforce_circulant \
   --epochs 100000 \
+  --compile --amp auto \
   --row0 ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/circulant/identity/identity_row0.npy \
-  --savename ./runs/ElmanRNN/circulant/identity \
-  --num_runs 3 > ./logs/circulant/identity.out 2>&1 &
+  --savename ./runs/ElmanRNN/circulant/test \
+  --num_runs 1 > ./logs/circulant/test.out 2>&1 &
 
 nohup python Main_clean.py \
   --input ./data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar \

@@ -245,6 +245,18 @@ parser.add_argument(
     default="",
     help="Path to a .npy file containing the first row (length H or shorter band) for initializing the circulant kernel.",
 )
+parser.add_argument(
+    "--compile",
+    action="store_true",
+    help="Wrap the model with torch.compile (PyTorch >= 2.0).",
+)
+parser.add_argument(
+    "--amp",
+    type=str,
+    default="auto",
+    choices=["off", "fp16", "bf16", "auto"],
+    help="Use mixed precision (auto picks bf16 if available, else fp16).",
+)
 
 
 def main():
@@ -556,10 +568,64 @@ def main():
             Target_mini = Target_mini.cuda()
             h0 = h0.cuda()
 
+        # ---- precision knobs (AMP + matmul) ----
+        if torch.cuda.is_available():
+            try:
+                torch.set_float32_matmul_precision("high")
+            except Exception:
+                pass
+
+        amp_enabled = (
+            (args.amp != "off") and torch.cuda.is_available() and _has_native_amp()
+        )
+        if args.amp == "bf16" or (args.amp == "auto" and _has_bf16_cuda()):
+            autocast_dtype = torch.bfloat16
+        elif args.amp in ("fp16", "auto"):
+            autocast_dtype = torch.float16
+        else:
+            autocast_dtype = None
+
+        # Optional: torch.compile (after moving to device)
+        if getattr(args, "compile", False) and hasattr(torch, "compile"):
+            try:
+                net = torch.compile(net, mode="max-autotune", fullgraph=False)
+                log("[compile] torch.compile enabled")
+            except Exception as e:
+                log(f"[compile] WARNING: fell back (reason: {e})")
+
         # ---------------
         # Optimizer (SGD)
         # ---------------
         optimizer = torch.optim.SGD(net.parameters(), lr=lr)
+
+        if amp_enabled and autocast_dtype is not None and _has_native_amp():
+            try:
+                # Preferred in PyTorch 2.4+: device-agnostic AMP
+                from torch.amp import GradScaler  # type: ignore[attr-defined]
+            except Exception:
+                # Fallback for older 2.x
+                from torch.cuda.amp import GradScaler
+            scaler = GradScaler(enabled=(autocast_dtype is not torch.bfloat16))
+        else:
+
+            class _NoopScaler:
+                def scale(self, loss):
+                    return loss
+
+                def step(self, opt):
+                    opt.step()
+
+                def update(self):
+                    pass
+
+                def unscale_(self, opt):
+                    pass
+
+            scaler = _NoopScaler()
+            if args.amp != "off":
+                log(
+                    "[amp] Native AMP not available on this build; running without AMP."
+                )
 
         # ------------------------------------------------
         # Build parameter masks for partial training (if any)
@@ -607,7 +673,16 @@ def main():
             W_hh_history,
             error_metrics_history,
         ) = train_partial(
-            X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, Mask, W0
+            X_mini,
+            Target_mini,
+            h0,
+            n_epochs,
+            net,
+            criterion,
+            optimizer,
+            scaler,
+            Mask,
+            W0,
         )
         end = time.time()
         deltat = end - start
@@ -704,7 +779,7 @@ def main():
 # Training loop with optional partial-parameter masks
 # -------------------------------------------------
 def train_partial(
-    X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, Mask, W0=None
+    X_mini, Target_mini, h0, n_epochs, net, criterion, optimizer, scaler, Mask, W0=None
 ):
     """
     Train with optional untrainable masks on selected parameters.
@@ -766,67 +841,134 @@ def train_partial(
 
             # Optional noise injection (proportional to input magnitude)
             if args.noisy_train:
-                random_part = torch.normal(
-                    mean=torch.zeros(X_mini.shape), std=X_mini.cpu() * args.noisy_train
-                ).to(X_mini.device)
+                # std scales with magnitude of X_mini; avoid any CPU hops
+                std = X_mini.abs() * args.noisy_train
+                random_part = torch.randn_like(X_mini) * std
                 X = X_mini + random_part
                 Target = Target_mini + random_part
             else:
                 X = X_mini
                 Target = Target_mini
 
-            # Forward pass
-            output, h_seq = net(X, h0)
+            # Forward + backward with optional AMP; grad metrics only on snapshot epochs
+            optimizer.zero_grad(set_to_none=True)
 
-            # Loss and backward pass
-            optimizer.zero_grad()
-            loss = criterion(output, Target)
-            loss.backward()
-
-            # --- Gradient metrics (PRE-CLIP / PRE-MASK) ---
-            grad_metrics_pre = _compute_grad_metrics(net)
-
-            # Record simple grad statistics (mean of squared gradients per param)
-            tmp = []
-            for name, p in net.named_parameters():
-                if p.requires_grad:
-                    if p.grad is None:
-                        print(f"WARNING: {name} has no grad")
-                        tmp.append(0.0)
-                    else:
-                        grad_np = p.grad.detach().cpu().numpy()
-                        tmp.append(np.mean(grad_np**2))
-            grad_list.append(tmp)
-
-            # Apply masks: zero gradients where Mask == True (freeze for those entries)
-            for l, p in enumerate(net.parameters()):
-                if p.requires_grad:
-                    mask = torch.from_numpy(Mask[l].astype(bool)).to(p.grad.device)
-                    p.grad.data[mask] = 0.0
-
-            # Optional gradient norm clipping (global norm)
-            if args.clamp_norm:
-                torch.nn.utils.clip_grad_norm_(net.parameters(), args.clamp_norm)
-
-            # --- Gradient metrics (POST-CLIP / POST-MASK) ---
-            grad_metrics_post = _compute_grad_metrics(net)
-
-            grad_metrics_history.append(
-                {
-                    "epoch": int(epoch),
-                    "pre": grad_metrics_pre,  # global + per-parameter
-                    "post": grad_metrics_post,  # global + per-parameter
-                    "clipped": bool(
-                        args.clamp_norm
-                        and (
-                            grad_metrics_post["global"]["L2"]
-                            < grad_metrics_pre["global"]["L2"]
-                        )
-                    ),
-                }
+            # Decide AMP dtype on the fly from args (safe here even if repeated each epoch)
+            use_amp = (
+                (args.amp != "off") and torch.cuda.is_available() and _has_native_amp()
             )
+            if use_amp and (
+                args.amp == "bf16" or (args.amp == "auto" and _has_bf16_cuda())
+            ):
+                _amp_dtype = torch.bfloat16
+            elif use_amp and (args.amp in ("fp16", "auto")):
+                _amp_dtype = torch.float16
+            else:
+                _amp_dtype = None
+                use_amp = False  # no autocast
 
-            optimizer.step()  # Update parameters
+            if use_amp:
+                # -----------------------
+                # AMP branch
+                # -----------------------
+                try:
+                    # Preferred (PyTorch 2.4+): device-agnostic AMP
+                    from torch import amp as _amp  # device-agnostic AMP
+
+                    ctx = _amp.autocast("cuda", dtype=_amp_dtype)
+                except Exception:
+                    # Fallback for older 2.x
+                    ctx = torch.cuda.amp.autocast(dtype=_amp_dtype)
+
+                with ctx:
+                    output, h_seq = net(X, h0)
+                    loss = criterion(output, Target)
+
+                # backward (scaled), then unscale for clipping/metrics
+                scaler.scale(loss).backward()
+
+                # Snapshot-only PRE metrics & simple grad stats
+                if epoch % args.print_freq == 0:
+                    grad_metrics_pre = _compute_grad_metrics(net)
+                    tmp = []
+                    for name, p in net.named_parameters():
+                        if p.requires_grad and p.grad is not None:
+                            g = p.grad.detach()
+                            tmp.append(float((g * g).mean().item()))
+                        elif p.requires_grad:
+                            tmp.append(0.0)
+                    grad_list.append(tmp)
+
+                # Optional global norm clip (on unscaled grads)
+                scaler.unscale_(optimizer)
+                if args.clamp_norm:
+                    torch.nn.utils.clip_grad_norm_(net.parameters(), args.clamp_norm)
+
+                # Snapshot-only POST metrics
+                if epoch % args.print_freq == 0:
+                    grad_metrics_post = _compute_grad_metrics(net)
+                    grad_metrics_history.append(
+                        {
+                            "epoch": int(epoch),
+                            "pre": grad_metrics_pre,
+                            "post": grad_metrics_post,
+                            "clipped": bool(
+                                args.clamp_norm
+                                and (
+                                    grad_metrics_post["global"]["L2"]
+                                    < grad_metrics_pre["global"]["L2"]
+                                )
+                            ),
+                        }
+                    )
+
+                # step
+                scaler.step(optimizer)
+                scaler.update()
+
+            else:
+                # -----------------------
+                # Non-AMP branch
+                # -----------------------
+                output, h_seq = net(X, h0)
+                loss = criterion(output, Target)
+                loss.backward()
+
+                # Snapshot-only PRE metrics & simple grad stats
+                if epoch % args.print_freq == 0:
+                    grad_metrics_pre = _compute_grad_metrics(net)
+                    tmp = []
+                    for name, p in net.named_parameters():
+                        if p.requires_grad and p.grad is not None:
+                            g = p.grad.detach()
+                            tmp.append(float((g * g).mean().item()))
+                        elif p.requires_grad:
+                            tmp.append(0.0)
+                    grad_list.append(tmp)
+
+                # Optional global norm clip
+                if args.clamp_norm:
+                    torch.nn.utils.clip_grad_norm_(net.parameters(), args.clamp_norm)
+
+                # Snapshot-only POST metrics
+                if epoch % args.print_freq == 0:
+                    grad_metrics_post = _compute_grad_metrics(net)
+                    grad_metrics_history.append(
+                        {
+                            "epoch": int(epoch),
+                            "pre": grad_metrics_pre,
+                            "post": grad_metrics_post,
+                            "clipped": bool(
+                                args.clamp_norm
+                                and (
+                                    grad_metrics_post["global"]["L2"]
+                                    < grad_metrics_pre["global"]["L2"]
+                                )
+                            ),
+                        }
+                    )
+
+                optimizer.step()
 
             # Optional nonegativity constraints after the step
             if args.constraini:
@@ -863,8 +1005,9 @@ def train_partial(
                 end = time.time()
                 deltat = end - start
                 start = time.time()
-                hidden_rep.append(h_seq.detach().cpu().numpy())
-                output_rep.append(output.detach().cpu().numpy())
+                # Cast to float32 so NumPy always supports the dtype (handles bf16/fp16 safely)
+                hidden_rep.append(h_seq.detach().to(torch.float32).cpu().numpy())
+                output_rep.append(output.detach().to(torch.float32).cpu().numpy())
                 snapshot_epochs.append(epoch)
                 # --- Hidden-state metrics (Activation, Stability, Dynamics, Geometry, Function) ---
                 act_stats = _hidden_activation_stats(
@@ -1502,6 +1645,43 @@ def _export_dense_Whh(net: nn.Module) -> torch.Tensor:
         return net.rnn.weight_hh_l0.detach().clone()
 
     raise AttributeError("No supported hidden->hidden weight found on this model.")
+
+
+def _has_bf16_cuda() -> bool:
+    """
+    True if this build/GPU practically supports bfloat16.
+    Uses torch.cuda.is_bf16_supported() when present; else checks SM version >= 8.0.
+    """
+    try:
+        fn = getattr(torch.cuda, "is_bf16_supported", None)
+        if callable(fn):
+            return bool(fn())
+    except Exception:
+        pass
+    try:
+        if torch.cuda.is_available():
+            major, _ = torch.cuda.get_device_capability()
+            return major >= 8  # Ampere+
+    except Exception:
+        pass
+    return False
+
+
+def _has_native_amp() -> bool:
+    try:
+        # Prefer the new, device-agnostic API (PyTorch 2.4+)
+        from torch import amp as _amp  # noqa: F401
+
+        return torch.cuda.is_available()
+    except Exception:
+        pass
+    try:
+        # Fallback for slightly older 2.x that still has cuda.amp
+        import torch.cuda.amp as _amp  # noqa: F401
+
+        return torch.cuda.is_available()
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":

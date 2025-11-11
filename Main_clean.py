@@ -33,6 +33,14 @@ import random
 from typing import Optional
 import math
 
+# ---- Early Stopping (fixed constants for train-loss ES) ----
+ES_WARMUP = 4000  # do not check ES before this epoch
+ES_PATIENCE = (
+    6000  # stop if no improvement for this many epochs (measured at snapshot cadence)
+)
+ES_MIN_DELTA = 1e-4  # required absolute improvement to reset patience
+
+
 parser = argparse.ArgumentParser(description="PyTorch Elman BPTT Training")
 parser.add_argument(
     "--epochs",
@@ -256,6 +264,11 @@ parser.add_argument(
     default="auto",
     choices=["off", "fp16", "bf16", "auto"],
     help="Use mixed precision (auto picks bf16 if available, else fp16).",
+)
+parser.add_argument(
+    "--early_stop",
+    action="store_true",
+    help="Enable early stopping on training loss (snapshot epochs only).",
 )
 
 
@@ -672,6 +685,9 @@ def main():
             weight_structure_history,
             W_hh_history,
             error_metrics_history,
+            best_epoch,
+            best_metric,
+            epochs_trained,
         ) = train_partial(
             X_mini,
             Target_mini,
@@ -687,6 +703,11 @@ def main():
         end = time.time()
         deltat = end - start
         log("Total training time: {0:.1f} minutes".format(deltat / 60))
+        log(
+            f"[train] epochs_requested={int(n_epochs)}, "
+            f"epochs_trained={int(epochs_trained)}"
+            f"{' (early-stop)' if (args.early_stop and int(epochs_trained) < int(n_epochs)) else ''}"
+        )
 
         # -----------------
         # Plot loss curve
@@ -750,6 +771,21 @@ def main():
                 ],
             },
             "n_epochs": int(n_epochs),
+            "training": {
+                "epochs_requested": int(n_epochs),
+                "epochs_trained": int(epochs_trained),
+                "stopped_early": bool(
+                    args.early_stop and int(epochs_trained) < int(n_epochs)
+                ),
+                "best_epoch": (
+                    int(best_epoch)
+                    if best_epoch is not None and best_epoch >= 0
+                    else None
+                ),
+                "best_metric": (
+                    float(best_metric) if best_metric is not None else None
+                ),
+            },
             "args": {
                 **vars(args),
                 "run_idx": run_idx,
@@ -826,6 +862,15 @@ def train_partial(
     weight_structure_history = []  # per-snapshot W_hh symmetry/asymmetry metrics
     W_hh_history = []  # raw W_hh per snapshot (float16)
     error_metrics_history = []  # per-snapshot error metrics (angle + residuals)
+
+    # --- Early stopping (train-loss) bookkeeping ---
+    best_metric = None
+    best_epoch = -1
+    epochs_since_improve = 0
+    best_state = None  # snapshot of best weights (CPU fp32)
+
+    def _is_better(new, best):
+        return (best is None) or (new < best - ES_MIN_DELTA)
 
     with tqdm(total=n_epochs, desc="Progress", unit="epoch") as pbar:
         for epoch in range(n_epochs):
@@ -980,19 +1025,6 @@ def train_partial(
                     if name == "linear.weight":
                         p.data.clamp_(0)
 
-            # Simple early stoppping: requires >1000; checks small loss change and low absolute loss
-            if epoch > 1000:
-                diff = [
-                    loss_list[i + 1] - loss_list[i] for i in range(len(loss_list) - 1)
-                ]
-                mean_diff = np.mean(abs(np.array(diff[-5:-1])))
-                init_loss = loss_list[0]
-                if (
-                    mean_diff < loss.item() * 0.00001
-                    and loss.item() < init_loss * 0.010
-                ):
-                    stop = True
-
             # Bookkeeping
             loss_list = np.append(loss_list, loss.item())
 
@@ -1060,6 +1092,51 @@ def train_partial(
                         deltat * (n_epochs - epoch) / args.print_freq / 60
                     )
                 )
+                # --- Early stopping on training loss (flag-guarded) ---
+                if args.early_stop:
+                    metric_val = float(
+                        loss.item()
+                    )  # use current training loss at snapshot epoch
+                    if epoch >= ES_WARMUP:
+                        if _is_better(metric_val, best_metric):
+                            best_metric = metric_val
+                            best_epoch = epoch
+                            epochs_since_improve = 0
+                            # store a lightweight fp32 CPU copy of weights
+                            best_state = {
+                                k: v.detach().cpu().clone()
+                                for k, v in net.state_dict().items()
+                            }
+                        else:
+                            epochs_since_improve += (
+                                args.print_freq
+                            )  # count patience in epochs
+
+                        if epochs_since_improve >= ES_PATIENCE:
+                            log(
+                                f"[early-stop] train-loss no improvement for {epochs_since_improve} epochs "
+                                f"(best @ {best_epoch}, metric={best_metric:.6f}); stopping."
+                            )
+                            stop = True
+    # --- Restore best model if ES ran ---
+    if args.early_stop and best_state is not None:
+        net.load_state_dict(best_state)
+
+    # --- Summarize how many epochs actually ran ---
+    epochs_trained = int(len(loss_list))
+    stopped_early = bool(args.early_stop and epochs_trained < int(n_epochs))
+    try:
+        log(
+            f"[train] epochs_trained={epochs_trained}/{int(n_epochs)}"
+            f"{' (early-stop)' if stopped_early else ''}"
+            + (
+                f"; best_epoch={best_epoch}, best_metric={best_metric:.6f}"
+                if (best_metric is not None and best_epoch >= 0)
+                else ""
+            )
+        )
+    except Exception:
+        pass  # logging is best-effort
 
     return (
         net,
@@ -1073,6 +1150,9 @@ def train_partial(
         weight_structure_history,
         W_hh_history,
         error_metrics_history,
+        best_epoch,
+        (float(best_metric) if best_metric is not None else None),
+        epochs_trained,
     )
 
 

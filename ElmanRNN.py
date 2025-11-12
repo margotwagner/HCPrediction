@@ -31,7 +31,7 @@ class ElmanRNN_circulant(nn.Module):
         # Nonlinearity
         if self.rnn_act == "relu":
             self.h_act = nn.ReLU()
-        elif self.rnn_act in ("", "none", None):
+        elif self.rnn_act == "none":
             self.h_act = nn.Identity()
         else:
             self.h_act = nn.Tanh()

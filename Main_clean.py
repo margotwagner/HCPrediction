@@ -151,9 +151,10 @@ parser.add_argument(
 )
 parser.add_argument(
     "--rnn_act",
-    default="",
     type=str,
-    help="Hidden nonlinearity: 'relu' to override (default tanh)",
+    default="tanh",
+    choices=["none", "tanh", "relu"],
+    help="Hidden activation: none | tanh | relu",
 )
 parser.add_argument(
     "--act_output",
@@ -412,7 +413,7 @@ def main():
                 input_dim=N,
                 hidden_dim=hidden_N,
                 output_dim=N,
-                rnn_act=("relu" if args.rnn_act == "relu" else "tanh"),  # default tanh
+                rnn_act=(args.rnn_act),
             )
 
             # Optional: initialize from --row0
@@ -431,6 +432,14 @@ def main():
             net._kernel_K0 = K0  # stash for checkpoint
 
         else:
+            if args.rnn_act == "none":
+                msg = (
+                    "[ERROR] --rnn_act none is not supported by ElmanRNN_pytorch_module_v2 "
+                    "(PyTorch nn.RNN supports only 'tanh' or 'relu'). "
+                    "Use --enforce_circulant for identity/linear hidden activation."
+                )
+                log(msg)
+                sys.exit(1)
             # Old path: keep your existing model
             net = ElmanRNN_pytorch_module_v2(
                 N, hidden_N, N, rnn_act=("relu" if args.rnn_act == "relu" else "tanh")
@@ -1042,9 +1051,7 @@ def train_partial(
                 output_rep.append(output.detach().to(torch.float32).cpu().numpy())
                 snapshot_epochs.append(epoch)
                 # --- Hidden-state metrics (Activation, Stability, Dynamics, Geometry, Function) ---
-                act_stats = _hidden_activation_stats(
-                    h_seq, act=("tanh" if args.rnn_act != "relu" else "relu")
-                )
+                act_stats = _hidden_activation_stats(h_seq, act=args.rnn_act)
                 dyn_metrics = _temporal_metrics(h_seq)
                 geom_metrics = _geometry_metrics(h_seq, max_components=10)
                 # Function: decode ring variable from Target (use same time slice as h_seq)
@@ -1317,23 +1324,45 @@ def _compute_grad_metrics(net: nn.Module):
 
 def _hidden_activation_stats(h_seq, act="tanh", sat_eps=0.95):
     """
-    h_seq: torch.Tensor [batch, T, H] hidden activity sequence
-    Returns scalar stats over batch×time×units (mean, std across all batchxtimexunits, sat_ratio fraction of activations near saturation if tanh, energy_L2_mean mean per-step L2 norm averaged over time).
+    h_seq: torch.Tensor [B, T, H]
+    Returns stats over B×T×H:
+      - mean, std
+      - sat_ratio: |h| >= sat_eps (only for tanh; else None)
+      - zero_frac: fraction of exact zeros (useful for ReLU; else None)
+      - energy_L2_mean: mean per-step L2 norm averaged over time
     """
-    h = h_seq.detach()
+    # be robust to mixed precision
+    h = h_seq.detach().to(torch.float32)
+
+    # basic stats
     mean = float(h.mean().item())
     std = float(h.std(unbiased=False).item())
+
+    # activation-specific extras
     if act == "tanh":
-        # fraction near saturation (|h| >= sat_eps)
-        sat = float(((h.abs() >= sat_eps).float().mean().item()))
-    else:
-        sat = None
-    # stability proxy: mean L2 over time (per-step norm averaged)
-    # reshape to [B*T, H]
-    BT, H = h.shape[0] * h.shape[1], h.shape[2]
+        sat_ratio = float((h.abs() >= sat_eps).float().mean().item())
+        zero_frac = None
+    elif act == "relu":
+        # dead ReLU proxy
+        zero_frac = float((h == 0).float().mean().item())
+        sat_ratio = None
+    else:  # "none" (identity / linear) or anything else
+        sat_ratio = None
+        zero_frac = None
+
+    # energy: average L2 norm per step
+    H = h.shape[-1]
     h2 = h.reshape(-1, H)
-    energy = float(_vector_norm_compat(h2, dim=-1).mean().item())
-    return {"mean": mean, "std": std, "sat_ratio": sat, "energy_L2_mean": energy}
+    # if you already have _vector_norm_compat, keep it; else torch.norm is fine:
+    energy = float(torch.norm(h2, dim=-1).mean().item())
+
+    return {
+        "mean": mean,
+        "std": std,
+        "sat_ratio": sat_ratio,
+        "zero_frac": zero_frac,
+        "energy_L2_mean": energy,
+    }
 
 
 def _temporal_metrics(h_seq):

@@ -49,8 +49,21 @@ import csv
 
 
 def _load_ckpt(path: str):
-    # map_location='cpu' to be robust on machines without GPU
-    return torch.load(path, map_location="cpu")
+    """
+    Load a training checkpoint saved by Main_clean.py.
+
+    For torch>=2.6, explicitly set weights_only=False so we can load
+    older checkpoints that contain pickled objects (NumPy, etc.).
+    For older torch versions that don't support weights_only, fall
+    back to the original signature.
+    """
+    path = str(path)
+    try:
+        # PyTorch ≥ 2.6: override new default weights_only=True
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        # PyTorch < 2.6: no weights_only arg
+        return torch.load(path, map_location="cpu")
 
 
 def _fro(x: np.ndarray) -> float:

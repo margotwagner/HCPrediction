@@ -47,55 +47,162 @@ import re
 import numpy as np, pandas as pd, os
 
 
-from RNN_Class import ElmanRNN_pytorch_module_v2  # your model class
+from ElmanRNN import ElmanRNN_pytorch_module_v2, ElmanRNN_circulant
 
 
 # ------------------------- Rebuild helpers -------------------------
 
 
-def _set_output_activation(net: nn.Module, ac_output: str):
+def _set_output_activation(net: nn.Module, act_output: str):
     """Match training-time output activation if it was overridden."""
-    if ac_output == "tanh":
-        net.act = nn.Tanh()
-    elif ac_output == "relu":
-        net.act = nn.ReLU()
-    elif ac_output == "sigmoid":
-        net.act = nn.Sigmoid()
+    if act_output == "tanh":
+        net.act_output = nn.Tanh()
+    elif act_output == "relu":
+        net.act_output = nn.ReLU()
+    elif act_output == "sigmoid":
+        net.act_output = nn.Sigmoid()
+    # else: keep whatever default (Softmax) the model has
 
 
-def _maybe_use_relu(net: nn.Module, use_relu: bool, N: int, H: int):
-    """Match training-time RNN nonlinearity toggle (--rnn_act relu)."""
-    if use_relu:
-        net.rnn = nn.RNN(N, H, 1, batch_first=True, nonlinearity="relu")
+def _unwrap_compiled_state_dict(state_dict: dict) -> dict:
+    """
+    Handle checkpoints saved from a torch.compile-wrapped model.
+
+    If keys are prefixed with '_orig_mod.', strip that prefix so that they
+    match the uncompiled module's parameter names.
+    """
+    if not any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        return state_dict
+
+    cleaned = {}
+    prefix = "_orig_mod."
+    for k, v in state_dict.items():
+        if k.startswith(prefix):
+            new_k = k[len(prefix) :]
+        else:
+            new_k = k
+        cleaned[new_k] = v
+    return cleaned
 
 
 def _load_ckpt(ckpt_path: Path, map_location="cpu"):
-    """Load a training checkpoint saved by Main_clean.py."""
-    return torch.load(ckpt_path, map_location=map_location)
+    """
+    Load a training checkpoint saved by Main_clean.py.
+
+    For torch>=2.6, explicitly set weights_only=False so we can load
+    older checkpoints that contain pickled objects (NumPy, etc.).
+    For older torch versions that don't support weights_only, fall
+    back to the original signature.
+    """
+    ckpt_path = str(ckpt_path)
+    try:
+        # PyTorch ≥ 2.6: override the new default weights_only=True
+        return torch.load(ckpt_path, map_location=map_location, weights_only=False)
+    except TypeError:
+        # PyTorch < 2.6: no weights_only arg
+        return torch.load(ckpt_path, map_location=map_location)
 
 
-def _rebuild_model_from_args(saved_args: dict, device: str):
-    """Reconstruct the ElmanRNN with the same dims/activations used during training."""
-    N = int(saved_args.get("n"))
-    H = int(saved_args.get("hidden_n"))
-    net = ElmanRNN_pytorch_module_v2(N, H, N).to(device)
-    rnn_act = saved_args.get("rnn_act", "")
-    _maybe_use_relu(net, rnn_act == "relu", N, H)
-    ac_output = saved_args.get("ac_output", "")
-    if ac_output:
-        _set_output_activation(net, ac_output)
+def _rebuild_model_from_args(saved_args: dict, device: str, state_dict: dict = None):
+    """
+    Reconstruct the network architecture from the training-time args
+    stored in the checkpoint.
+
+    For circulant models, we also adapt the conv kernel size to match
+    the checkpoint (since init_from_row0 may have compressed K < H).
+    """
+    # Input / hidden sizes
+    N = int(saved_args.get("n", saved_args.get("N", 100)))
+    H = int(saved_args.get("hidden_n", saved_args.get("hidden_size", 100)))
+
+    # Hidden nonlinearity used at training
+    rnn_act = saved_args.get("rnn_act", "tanh")
+    enforce_circ = bool(saved_args.get("enforce_circulant", False))
+
+    if enforce_circ:
+        # Build circulant model with default kernel size (= H)
+        net = ElmanRNN_circulant(
+            input_dim=N,
+            hidden_dim=H,
+            output_dim=N,
+            rnn_act=rnn_act,
+        )
+
+        # If we have a checkpoint, adapt the kernel size to what was
+        # actually used during training (from hh_circ.conv.weight).
+        if state_dict is not None and "hh_circ.conv.weight" in state_dict:
+            desired_K = int(state_dict["hh_circ.conv.weight"].shape[-1])
+            current_K = int(net.hh_circ.conv.weight.shape[-1])
+            if desired_K != current_K:
+                # Rebuild conv to have the right kernel size; weights
+                # will be loaded from the state_dict afterwards.
+                net.hh_circ.conv = torch.nn.Conv1d(
+                    in_channels=1,
+                    out_channels=1,
+                    kernel_size=desired_K,
+                    padding=0,
+                    padding_mode="circular",
+                    bias=False,
+                )
+    else:
+        # Dense Elman RNN; only "tanh" and "relu" are actually supported
+        net = ElmanRNN_pytorch_module_v2(
+            input_dim=N,
+            hidden_dim=H,
+            output_dim=N,
+            rnn_act=("relu" if rnn_act == "relu" else "tanh"),
+        )
+
+    net = net.to(device)
+
+    # Match training-time output activation. Training uses --act_output;
+    # some older code had --ac_output, so we support both keys.
+    act_output = saved_args.get("act_output", saved_args.get("ac_output", ""))
+    if act_output:
+        _set_output_activation(net, act_output)
+
     return net, N, H
 
 
-def _forward_sequence(state_dict, X: torch.Tensor, saved_args: dict, device: str):
-    """Teacher-forced forward pass on a whole sequence X (returns CPU tensor)."""
-    net, N, H = _rebuild_model_from_args(saved_args, device)
+def _forward_sequence(
+    state_dict,
+    X_in: torch.Tensor,
+    saved_args: dict,
+    device: str,
+    return_hidden: bool = False,
+):
+    """
+    Runs the saved model on X_in (teacher-forced).
+
+    Args
+    ----
+    state_dict: checkpoint['state_dict']
+    X_in:       [B, T, N] input sequence
+    saved_args: checkpoint['args'] dict from training
+    device:     "cpu" or "cuda:0"
+    return_hidden: if True, also return hidden sequence
+
+    Returns
+    -------
+    Y_out (cpu tensor) or (Y_out, h_seq) both on cpu.
+    """
+    # Handle torch.compile checkpoints: strip "_orig_mod." if present
+    state_dict = _unwrap_compiled_state_dict(state_dict)
+
+    # Rebuild net architecture (this will also see the cleaned state_dict
+    # so circulant kernel size can be adapted correctly).
+    net, N, H = _rebuild_model_from_args(saved_args, device, state_dict)
     net.load_state_dict(state_dict)
     net.eval()
+
     with torch.no_grad():
-        h0 = torch.zeros(1, X.shape[0], H, device=device)
-        Y_out, _ = net(X.to(device), h0)
-    return Y_out.cpu()
+        # h0: [1, B, H] for both dense and circulant Elman variants
+        h0 = torch.zeros(1, X_in.shape[0], H, device=device)
+        Y_out, h_seq = net(X_in.to(device), h0)
+
+    Y_out = Y_out.cpu()
+    h_seq = h_seq.cpu()
+    return (Y_out, h_seq) if return_hidden else Y_out
 
 
 # ---------- Training-summary writer (reads keys saved by Main_clean.py) ----------
@@ -138,7 +245,7 @@ def _write_train_summary(ckpt_path: Path):
     out_csv = ckpt_path.with_name(stub + "_train_summary.csv")
 
     # Load checkpoint
-    ckpt = torch.load(str(ckpt_path), map_location="cpu")
+    ckpt = _load_ckpt(ckpt_path, map_location="cpu")
 
     # ---------- Basic run info ----------
     args_dict = ckpt.get("args", {}) or {}
@@ -510,29 +617,6 @@ def _phase_drift_per_step(output, Target):
     return float(b)
 
 
-def _forward_sequence(state_dict, X_in, args, device, return_hidden=False):
-    """
-    Runs the saved model on X_in.
-    Returns:
-      Y_out if return_hidden=False
-      (Y_out, h_seq) if return_hidden=True
-    """
-    # Rebuild the model the same way as in training
-    N = args["n"]
-    HN = args["hidden_n"]
-    net = ElmanRNN_pytorch_module_v2(N, HN, N)
-    net.load_state_dict(state_dict)
-    net.to(device)
-    net.eval()
-
-    with torch.no_grad():
-        # h0 as zeros: [1, B, H]
-        h0 = torch.zeros(1, X_in.shape[0], HN, device=device)
-        # Forward returns (output, h_seq) in your RNN_Class
-        Y_out, h_seq = net(X_in.to(device), h0)
-    return (Y_out, h_seq) if return_hidden else Y_out
-
-
 def _decode_angles_from_outputs(Y):  # Y: [B,T,N] probs or raw
     B, T, N = Y.shape
     # Normalize to prob-simplex for angle decoding
@@ -605,7 +689,10 @@ def _forward_closed_loop(
       X_all: inputs actually fed       [B, prefix_T+free_steps, N]
       prefix_T_used: int
     """
-    net, N, H = _rebuild_model_from_args(saved_args, device)
+    # Handle torch.compile checkpoints: strip "_orig_mod." if present
+    state_dict = _unwrap_compiled_state_dict(state_dict)
+
+    net, N, H = _rebuild_model_from_args(saved_args, device, state_dict)
     net.load_state_dict(state_dict)
     net.eval()
 
@@ -663,7 +750,7 @@ def evaluate_open(ckpt_path, device="cpu", data_path=None):
         X = ckpt["X_mini"].clone()
         Y_true = ckpt["Target_mini"].clone()
     else:
-        external = torch.load(data_path, map_location=device)
+        external = torch.load(str(data_path), map_location=device)
         X, Y_true = external["X_mini"], external["Target_mini"]
 
     Y_out = _forward_sequence(ckpt["state_dict"], X, args, device)

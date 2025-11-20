@@ -19,7 +19,7 @@ nohup python Main_clean.py \
   --rnn_act "none" \
   --row0 ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/circulant/centeredmh/centeredmh_row0.npy  \
   --savename ./runs/ElmanRNN/linear/centeredmh \
-  --num_runs 3 > ./logs/linear/centeredmh.out 2>&1 &
+  --num_runs 1 > ./logs/linear/centeredmh.out 2>&1 &
 
 SYM="sym1p00"
 nohup python Main_clean.py \

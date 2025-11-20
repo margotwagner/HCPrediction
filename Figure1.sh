@@ -77,3 +77,55 @@ python make_figures.py --just 1 \
 python make_figures.py --just 1 \
   --conditions "$conds_csv" \
   --figdir ./figs/fig1 --figtag loglog_pretrained --fig1_logxA --fig1_logxB --fig1_logyA --fig1_logyB
+
+
+# Identity weight initialization
+conditions=(
+  "./runs/ElmanRNN/identityih/random_baseline"
+  "./runs/ElmanRNN/identityih/shift-variants/identity"
+  "./runs/ElmanRNN/identityih/shift-variants/shift/sym0p50/shift_sym0p50"
+  "./runs/ElmanRNN/identityih/shift-variants/cyc-shift/sym0p50/cycshift_sym0p50"
+  "./runs/ElmanRNN/identityih/mh-variants/shifted/sym0p50/shiftmh_sym0p50"
+)
+IFS=, conds_csv="${conditions[*]}"; unset IFS
+python make_figures.py --just 1 \
+  --conditions "$conds_csv" \
+  --figdir ./figs/fig1/identityih --figtag logy_best --fig1_logyA --fig1_logyB
+
+python make_figures.py --just 1 \
+  --conditions "$conds_csv" \
+  --figdir ./figs/fig1/identityih --figtag raw_best
+
+# Enforcing circulant
+conditions=(
+  "./runs/ElmanRNN/identityih/random_baseline"
+  "./runs/ElmanRNN/circulant/identity"
+  "./runs/ElmanRNN/circulant/shift/sym0p50/shift_circ_sym0p50"
+  "./runs/ElmanRNN/circulant/shiftedmh/sym0p50/shiftedmh_circ_sym0p50"
+  "./runs/ElmanRNN/circulant/centeredmh"
+)
+IFS=, conds_csv="${conditions[*]}"; unset IFS
+python make_figures.py --just 1 \
+  --conditions "$conds_csv" \
+  --figdir ./figs/fig1/circulant --figtag logy --fig1_logyA --fig1_logyB
+
+python make_figures.py --just 1 \
+  --conditions "$conds_csv" \
+  --figdir ./figs/fig1/circulant --figtag raw
+
+# Linear activation
+conditions=(
+  "./runs/ElmanRNN/identityih/random_baseline"
+  "./runs/ElmanRNN/circulant/identity"
+  "./runs/ElmanRNN/linear/identity"
+#  "./runs/ElmanRNN/circulant/shift/sym0p50"
+#  "./runs/ElmanRNN/linear/shift/sym0p50"
+)
+IFS=, conds_csv="${conditions[*]}"; unset IFS
+python make_figures.py --just 1 \
+  --conditions "$conds_csv" \
+  --figdir ./figs/fig1/linear --figtag logy --fig1_logyA --fig1_logyB
+
+python make_figures.py --just 1 \
+  --conditions "$conds_csv" \
+  --figdir ./figs/fig1/linear --figtag raw

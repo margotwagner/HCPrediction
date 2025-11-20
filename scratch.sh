@@ -17,7 +17,7 @@ python aggregate_metrics.py --root "${BASE}"
 # ----------------------------------------------------------------
 
 # Set variables
-BASE="./runs/ElmanRNN/circulant/shiftedmh"
+BASE="./runs/ElmanRNN/linear/shift"
 SYM="sym1p00"
 FULL="${BASE}/${SYM}"
 

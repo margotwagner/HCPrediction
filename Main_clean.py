@@ -511,7 +511,7 @@ def main():
                     p.data.fill_(0)
                     log("Fixing RNN hidden-hidden bias to 0")
 
-                if args.fixi:
+        if args.fixi:
             for name, p in net.named_parameters():
                 # Handle BOTH architectures:
                 # - dense Elman: rnn.weight_ih_l0 / rnn.bias_ih_l0
@@ -545,18 +545,23 @@ def main():
 
                         # Also zero & freeze the matching input bias
                         if name == "rnn.weight_ih_l0":
-                            if hasattr(net.rnn, "bias_ih_l0") and net.rnn.bias_ih_l0 is not None:
+                            if (
+                                hasattr(net.rnn, "bias_ih_l0")
+                                and net.rnn.bias_ih_l0 is not None
+                            ):
                                 with torch.no_grad():
                                     net.rnn.bias_ih_l0.zero_()
                                 net.rnn.bias_ih_l0.requires_grad_(False)
                                 log("[fixi] zeroed & froze rnn.bias_ih_l0")
                         elif name == "input_linear.weight":
-                            if hasattr(net, "input_linear") and net.input_linear.bias is not None:
+                            if (
+                                hasattr(net, "input_linear")
+                                and net.input_linear.bias is not None
+                            ):
                                 with torch.no_grad():
                                     net.input_linear.bias.zero_()
                                 net.input_linear.bias.requires_grad_(False)
                                 log("[fixi] zeroed & froze input_linear.bias")
-
 
         if args.fixo:
             for name, p in net.named_parameters():
@@ -610,7 +615,9 @@ def main():
                             - (1.0 / np.sqrt(N))
                         )
                     p.requires_grad_(False)
-                    log("[fixw] fixed hh_circ.conv.weight to random kernel and froze it")
+                    log(
+                        "[fixw] fixed hh_circ.conv.weight to random kernel and froze it"
+                    )
 
         # ------------------
         # Loss & resume

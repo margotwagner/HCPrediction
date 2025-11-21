@@ -44,3 +44,41 @@ python make_figures.py --just 4 \
   --conditions "/runs/ElmanRNN/identity/frobenius/sym0p90/identity_n100_fro,\
 /runs/ElmanRNN/mexhat/frobenius/sym0p70/mexhat_n100_fro" \
   --figdir ./figs/fig4
+
+# Unconstrained
+python make_figures.py --just 4 \
+  --conditions  "./runs/ElmanRNN/identityih/random_baseline" \
+  --figdir ./figs/fig4/identityih --figtag baseline --vmin -2 --vmax 2
+
+python make_figures.py --just 4 \
+  --conditions "./runs/ElmanRNN/identityih/shift-variants/identity" \
+  --figdir ./figs/fig4/identityih --figtag identity --vmin -2 --vmax 2
+
+python make_figures.py --just 4 \
+  --conditions "./runs/ElmanRNN/identityih/shift-variants/shift/sym1p00/shift_sym1p00" \
+  --figdir ./figs/fig4/identityih --figtag shift --vmin -2 --vmax 2
+
+python make_figures.py --just 4 \
+  --conditions "./runs/ElmanRNN/identityih/shift-variants/cyc-shift/sym0p75/cycshift_sym0p75" \
+  --figdir ./figs/fig4/identityih --figtag cycshift --vmin -2 --vmax 2
+
+python make_figures.py --just 4 \
+  --conditions "./runs/ElmanRNN/identityih/mh-variants/shifted/sym0p50/shiftmh_sym0p50" \
+  --figdir ./figs/fig4/identityih --figtag shiftmh --vmin -2 --vmax 2
+
+# Constrained
+python make_figures.py --just 4 \
+  --conditions "./runs/ElmanRNN/circulant/identity" \
+  --figdir ./figs/fig4/circulant --figtag identity --vmin -2 --vmax 2
+
+python make_figures.py --just 4 \
+  --conditions "./runs/ElmanRNN/circulant/centeredmh" \
+  --figdir ./figs/fig4/circulant --vmin -2 --vmax 2
+
+python make_figures.py --just 4 \
+  --conditions "./runs/ElmanRNN/circulant/shift/sym1p00/shift_circ_sym1p00" \
+  --figdir ./figs/fig4/circulant --vmin -2 --vmax 2
+
+python make_figures.py --just 4 \
+  --conditions "./runs/ElmanRNN/circulant/shiftedmh/sym1p00/shiftedmh_circ_sym1p00" \
+  --figdir ./figs/fig4/circulant --vmin -2 --vmax 2

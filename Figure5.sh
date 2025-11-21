@@ -56,3 +56,53 @@ python make_figures.py \
   --cond_glob "./runs/ElmanRNN/clean/**/sym*/identity_n100_fro" "./runs/ElmanRNN/clean/**/sym*/shiftcyc_n100_fro" \
   --fig5_time all \
   --figdir ./figs --figtag sweep
+
+# Unconstrained
+python make_figures.py \
+  --just 5 \
+  --conditions "./runs/ElmanRNN/identityih/random_baseline" \
+  --fig5_time all \
+  --figdir ./figs/fig5/identityih --fontsize 12
+
+python make_figures.py \
+  --just 5 \
+  --conditions "./runs/ElmanRNN/identityih/shift-variants/identity" \
+  --fig5_time all \
+  --figdir ./figs/fig5/identityih --fontsize 12
+
+python make_figures.py \
+  --just 5 \
+  --conditions "./runs/ElmanRNN/identityih/shift-variants/shift/sym0p00/shift_sym0p00" \
+  --fig5_time all \
+  --figdir ./figs/fig5/identityih --fontsize 12
+
+python make_figures.py \
+  --just 5 \
+  --conditions "./runs/ElmanRNN/identityih/shift-variants/cyc-shift/sym0p75/cycshift_sym0p75" \
+  --fig5_time all \
+  --figdir ./figs/fig5/identityih --fontsize 12
+
+python make_figures.py \
+  --just 5 \
+  --conditions "./runs/ElmanRNN/identityih/mh-variants/shifted/sym0p00/shiftmh_sym0p00" \
+  --fig5_time all \
+  --figdir ./figs/fig5/identityih --fontsize 12
+
+# Constrained
+python make_figures.py \
+  --just 5 \
+  --conditions "./runs/ElmanRNN/circulant/identity" \
+  --fig5_time all \
+  --figdir ./figs/fig5/circulant --fontsize 12
+
+python make_figures.py \
+  --just 5 \
+  --conditions "./runs/ElmanRNN/circulant/centeredmh" \
+  --fig5_time all \
+  --figdir ./figs/fig5/circulant --fontsize 12
+
+python make_figures.py \
+  --just 5 \
+  --conditions "./runs/ElmanRNN/circulant/shiftedmh/sym0p75/shiftedmh_circ_sym0p75" \
+  --fig5_time all \
+  --figdir ./figs/fig5/circulant --fontsize 12

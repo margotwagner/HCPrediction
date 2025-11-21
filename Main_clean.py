@@ -160,7 +160,10 @@ parser.add_argument(
     "--act_output",
     default="",
     type=str,
-    help="Output activation override: tanh|relu|sigmoid (default softmax along dim=2 in class)",
+    help=(
+        "Output activation override: linear|tanh|relu|sigmoid "
+        "(default is softmax along dim=2 as defined in the model class)"
+    ),
 )
 parser.add_argument(
     "--pred",
@@ -493,6 +496,10 @@ def main():
         elif args.act_output == "sigmoid":
             net.act_output = nn.Sigmoid()
             log("Change output activation function to sigmoid")
+        elif args.act_output in ("linear", "identity"):
+            # no nonlinearity – raw linear readout
+            net.act_output = nn.Identity()
+            log("Change output activation function to identity (linear)")
 
         # ------------------------------
         # Optional parameter constraints
@@ -504,66 +511,106 @@ def main():
                     p.data.fill_(0)
                     log("Fixing RNN hidden-hidden bias to 0")
 
-        if args.fixi:
+                if args.fixi:
             for name, p in net.named_parameters():
-                if name == "rnn.weight_ih_l0":
+                # Handle BOTH architectures:
+                # - dense Elman: rnn.weight_ih_l0 / rnn.bias_ih_l0
+                # - circulant Elman: input_linear.weight / input_linear.bias
+                if name in ("rnn.weight_ih_l0", "input_linear.weight"):
                     if args.fixi == 1:
                         # Positive constant matrix (uniform average)
-                        p.data = torch.ones(p.shape) / (p.shape[0] * p.shape[1])
-                        log("Fixing {} to positive constant".format(name))
+                        with torch.no_grad():
+                            p.copy_(torch.ones_like(p) / (p.shape[0] * p.shape[1]))
+                        log(f"[fixi] set {name} to positive constant (uniform)")
+
                     elif args.fixi == 2:
                         # Preserve initialization but freeze it
-                        log("Fixing {} to initialization".format(name))
+                        p.requires_grad_(False)
+                        log(f"[fixi] froze {name} at its initialization")
+
                     elif args.fixi == 3:
-                        # Make current init nonegative by folding absolute values
-                        p.data = p.data + torch.abs(p.data)
-                        log("Fixing {} to positive initiation".format(name))
+                        # Make current init nonnegative by folding absolute values
+                        with torch.no_grad():
+                            p.copy_(p + torch.abs(p))
+                        log(f"[fixi] made {name} nonnegative (abs-fold)")
+
                     elif args.fixi == 4:
-                        # identity (rectangular eye) and freeze
+                        # Identity (rectangular eye) and freeze
                         H, N_in = p.shape  # (hidden, input)
                         eye = torch.eye(H, N_in, device=p.device, dtype=p.dtype)
                         with torch.no_grad():
                             p.copy_(eye)
                         p.requires_grad_(False)
-                        log("[fixi] set {} to identity and froze it".format(name))
+                        log(f"[fixi] set {name} to identity and froze it")
 
-                        # Also zero & freeze the input→hidden bias to preserve pure identity mapping
-                        if (
-                            hasattr(net.rnn, "bias_ih_l0")
-                            and net.rnn.bias_ih_l0 is not None
-                        ):
-                            with torch.no_grad():
-                                net.rnn.bias_ih_l0.zero_()
-                            net.rnn.bias_ih_l0.requires_grad_(False)
-                            log(
-                                "[fixi] zeroed & froze rnn.bias_ih_l0 for pure identity input mapping"
-                            )
+                        # Also zero & freeze the matching input bias
+                        if name == "rnn.weight_ih_l0":
+                            if hasattr(net.rnn, "bias_ih_l0") and net.rnn.bias_ih_l0 is not None:
+                                with torch.no_grad():
+                                    net.rnn.bias_ih_l0.zero_()
+                                net.rnn.bias_ih_l0.requires_grad_(False)
+                                log("[fixi] zeroed & froze rnn.bias_ih_l0")
+                        elif name == "input_linear.weight":
+                            if hasattr(net, "input_linear") and net.input_linear.bias is not None:
+                                with torch.no_grad():
+                                    net.input_linear.bias.zero_()
+                                net.input_linear.bias.requires_grad_(False)
+                                log("[fixi] zeroed & froze input_linear.bias")
+
 
         if args.fixo:
             for name, p in net.named_parameters():
-                if name == "linear.weight":
+                # Dense Elman output layer
+                is_dense_out = name == "linear.weight"
+                # Circulant Elman output layer
+                is_circ_out = name == "output_linear.weight"
+
+                if is_dense_out or is_circ_out:
                     if args.fixo == 1:
-                        p.data = torch.ones(p.shape) / (p.shape[0] * p.shape[1])
-                        log("Fixing {} to positive constant".format(name))
+                        # Positive constant matrix (uniform average)
+                        with torch.no_grad():
+                            p.copy_(torch.ones_like(p) / (p.shape[0] * p.shape[1]))
+                        log(f"[fixo] set {name} to positive constant and froze it")
                     elif args.fixo == 2:
-                        log("Fixing {} to initialization".format(name))
+                        # Preserve initialization but freeze it
+                        log(f"[fixo] freezing {name} at initialization")
                     elif args.fixo == 3:
-                        p.data = p.data + torch.abs(p.data)
-                        log("Fixing {} to positive initiation".format(name))
-                    p.requires_grad = False
+                        # Make current init nonnegative by folding absolute values
+                        with torch.no_grad():
+                            p.copy_(p + torch.abs(p))
+                        log(f"[fixo] made {name} nonnegative and froze it")
+
+                    p.requires_grad_(False)
 
         if args.fixw:
             for name, p in net.named_parameters():
+                # Dense Elman recurrent weight / bias
                 if name == "rnn.weight_hh_l0":
-                    p.requires_grad = False
-                    p.data = torch.rand(p.data.shape) * 2 * 1 / np.sqrt(
-                        N
-                    ) - 1 / np.sqrt(N)
-                    log("Fixing recurrent matrix to a random matrix")
+                    with torch.no_grad():
+                        # random in [-1/sqrt(N), 1/sqrt(N)]
+                        p.copy_(
+                            torch.rand_like(p) * 2.0 * (1.0 / np.sqrt(N))
+                            - (1.0 / np.sqrt(N))
+                        )
+                    p.requires_grad_(False)
+                    log("[fixw] fixed rnn.weight_hh_l0 to random matrix and froze it")
+
                 elif name == "rnn.bias_hh_l0":
-                    p.requires_grad = False
-                    p.data.fill_(0)
-                    log("Fixing recurrent bias to 0")
+                    with torch.no_grad():
+                        p.fill_(0.0)
+                    p.requires_grad_(False)
+                    log("[fixw] fixed rnn.bias_hh_l0 to 0 and froze it")
+
+                # Circulant Elman recurrent kernel
+                elif name == "hh_circ.conv.weight":
+                    with torch.no_grad():
+                        # kernel shape [1, 1, H]; sample similar range
+                        p.copy_(
+                            torch.rand_like(p) * 2.0 * (1.0 / np.sqrt(N))
+                            - (1.0 / np.sqrt(N))
+                        )
+                    p.requires_grad_(False)
+                    log("[fixw] fixed hh_circ.conv.weight to random kernel and froze it")
 
         # ------------------
         # Loss & resume

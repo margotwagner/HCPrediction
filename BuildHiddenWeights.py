@@ -83,7 +83,7 @@ def build_tridiag(
     return W
 
 
-def build_mexican_hat(
+def build_log_mexican_hat(
     n: int,
     sigma: Optional[float] = None,
     diag_offset: int = 0,
@@ -92,6 +92,8 @@ def build_mexican_hat(
     """
     1D Mexican-hat kernel as Toeplitz (non-cyclic) or circulant (cyclic).
     Shift the 'bump' off the main diagonal with diag_offset.
+    Built using Laplacian-of-Gaussian (LoG), which is more typical in neural field models/sensory cortex NOT hippocampus.
+    sigma: width of excitation/inhibition
     """
     if sigma is None:
         sigma = n / 10.0
@@ -141,3 +143,86 @@ def build_orthogonal(
     if ensure_det_pos and np.linalg.det(Q) < 0:
         Q[:, 0] *= -1.0
     return (scale * Q).astype(np.float32)
+
+
+def build_mexican_hat_dog(
+    n: int,
+    sigma_e: Optional[float] = None,
+    sigma_i: Optional[float] = None,
+    a: float = 1.0,
+    b: float = 0.25,
+    diag_offset: int = 0,
+    cyclic: bool = False,
+) -> np.ndarray:
+    """
+    1D Difference-of-Gaussians (DoG) Mexican-hat kernel as Toeplitz (non-cyclic)
+    or circulant (cyclic). Shift the bump off the main diagonal with diag_offset.
+
+    Parameters
+    ----------
+    n : int
+        Number of units (hidden size).
+    sigma_e : float, optional
+        Width of the excitatory Gaussian footprint. If None, defaults to n/20.
+    sigma_i : float, optional
+        Width of the inhibitory Gaussian footprint. If None, defaults to 2*sigma_e.
+    a : float
+        Amplitude (strength) of excitation.
+    b : float
+        Amplitude (strength) of inhibition.
+    diag_offset : int
+        Integer shift of the kernel relative to the main diagonal.
+        0 gives a centered bump; negative values (e.g., -k) can encourage
+        traveling-wave dynamics / directional bias.
+    cyclic : bool
+        If True, build a circulant matrix (ring). If False, build a Toeplitz
+        matrix with truncation at the edges.
+
+    Returns
+    -------
+    W : (n, n) np.ndarray (float32)
+        Recurrent weight matrix.
+    """
+    if sigma_e is None:
+        sigma_e = n / 20.0  # narrower local excitation by default
+    if sigma_i is None:
+        sigma_i = 2.0 * sigma_e  # broader inhibition
+
+    # --- Build 1D DoG kernel k(d) ---
+    if cyclic:
+        # distances on a ring: symmetric around zero
+        offs = np.arange(n)
+        offs_signed = ((offs + n // 2) % n) - n // 2
+        d = np.abs(offs_signed).astype(np.float64)
+    else:
+        # distances for Toeplitz: from -(n-1) to +(n-1)
+        m = np.arange(-(n - 1), (n - 1) + 1)
+        d = np.abs(m).astype(np.float64)
+
+    # Difference of Gaussians
+    k = (
+        a * np.exp(-(d**2) / (2.0 * sigma_e**2))
+        - b * np.exp(-(d**2) / (2.0 * sigma_i**2))
+    ).astype(np.float32)
+
+    # --- Embed as W (n x n) with optional diagonal shift ---
+    W = np.zeros((n, n), dtype=np.float32)
+
+    if cyclic:
+        # circulant: each column is a shifted version of k
+        i = np.arange(n)
+        for j in range(n):
+            # index into k with a circular shift and diag_offset
+            m = (i - j - diag_offset) % n
+            W[i, j] = k[m]
+        return W
+
+    # Toeplitz with shift (non-cyclic)
+    i = np.arange(n)[:, None]
+    j = np.arange(n)[None, :]
+    off = (i - j) - diag_offset  # which offset between i,j
+    # map offset to index in k (which has length 2*(n-1)+1)
+    k_idx = off + (n - 1)
+    mask = (k_idx >= 0) & (k_idx < k.shape[0])
+    W[mask] = k[k_idx[mask]]
+    return W

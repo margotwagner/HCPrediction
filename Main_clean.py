@@ -96,7 +96,7 @@ parser.add_argument(
     "--ae",
     default=0,
     type=int,
-    help="If 1, use Autoencoder objective (Target == Input). Used for testing, not training.",
+    help="If 1, use Autoencoder objective (Target == Input).",
 )
 parser.add_argument(
     "--partial",

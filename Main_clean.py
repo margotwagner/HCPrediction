@@ -175,48 +175,7 @@ parser.add_argument(
     type=float,
     help="(DEPRECATED / NONFUNCTIONAL) If > 0, add multiplicative Gaussian noise ~N(0, (X*noisy_train)^2) to X and Target each step",
 )
-parser.add_argument("--seed", type=int, default=1337, help="Global RNG seed")
-parser.add_argument(
-    "--whh_type",
-    type=str,
-    default="none",
-    choices=[
-        "none",
-        "cent",
-        "cent-cyc",
-        "shifted",
-        "shifted-cyc",
-        "identity",
-        "shift",
-        "shift-cyc",
-    ],
-    help="Hidden-weight init type; use 'none' for standard random init (no override).",
-)
-parser.add_argument(
-    "--whh_norm",
-    type=str,
-    default="raw",
-    choices=["frobenius", "raw"],
-    help="Normalization strategy for hidden weight",
-)
-parser.add_argument(
-    "--alpha",
-    type=float,
-    default=None,
-    help="Symmetry percent in [0,1]. Needed for shifted/shift variants; ignored for cent/cent-cyc/identity",
-)
-parser.add_argument(
-    "--out_root",
-    type=str,
-    default="./runs",
-    help="Root directory for outputs; subfolders mirror hidden-weight init structure",
-)
-parser.add_argument(
-    "--run_tag",
-    type=str,
-    default="",
-    help="Optional extra tag appended to filename (e.g., seed or note)",
-)
+parser.add_argument("--seed", type=int, default=42, help="Global RNG seed")
 parser.add_argument(
     "--num_runs",
     type=int,
@@ -233,22 +192,12 @@ parser.add_argument(
     "--whh_path",
     type=str,
     default="",
-    help=(
-        "Path to a hidden-weight .npy (H×H). If set, overrides --whh_type/--whh_norm/--alpha "
-        "and outputs are saved under ./runs/ElmanRNN/<subdirs from whh_path>/"
-        "<filename_stem>..."
-    ),
+    help=("Path to a hidden-weight .npy (H×H for dense, row0 for circulant)."),
 )
 parser.add_argument(
     "--enforce_circulant",
     action="store_true",
     help="If set, replace RNN recurrence with a circulant (circular-convolution) parameterization.",
-)
-parser.add_argument(
-    "--row0",
-    type=str,
-    default="",
-    help="Path to a .npy file containing the first row (length H or shorter band) for initializing the circulant kernel.",
 )
 parser.add_argument(
     "--compile",
@@ -294,77 +243,24 @@ def main():
             "--noisy_train is deprecated and currently nonfunctional. "
             "Please omit it or set --noisy_train 0."
         )
-
-    if args.whh_path and args.whh_type != "none":
-        print(
-            "[whh] NOTE: --whh_path provided; overriding --whh_type/--whh_norm/--alpha"
+    if not args.whh_path:
+        raise ValueError(
+            "--whh_path is required and must point to a .npy file containing "
+            "the hidden weights: for circulant (--enforce_circulant) this "
+            "should be a single row vector; for dense it must be an HxH matrix."
         )
+    if not args.savename:
+        raise ValueError(
+            "--savename is required and must be a base path (no extension) "
+            "for outputs."
+        )
+
     lr = args.lr
     n_epochs = args.epochs
     N = args.n
     hidden_N = args.hidden_n
     set_seed(args.seed)
     f = None  # global log handle (opened per run later)
-
-    # Auto-build savename if not provided, mirroring init structure
-    if not args.savename:
-        if args.whh_path:
-            # Mirror the provided hidden-weight path under ./runs/ElmanRNN/...
-            # Example:
-            # whh_path = ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/learned/random_n100/raw/random_n100_learned.npy
-            # out_dir  = ./runs/ElmanRNN/learned/random_n100/raw
-            # savename = ./runs/ElmanRNN/learned/random_n100/raw/random_n100_learned
-            from pathlib import Path
-
-            p = Path(args.whh_path).resolve()
-            parts = list(p.parts)
-            stem = p.stem  # filename without extension
-
-            # Find "ElmanRNN" in the path and take everything after it (except the filename)
-            try:
-                idx = parts.index("ElmanRNN")
-                subdirs = parts[idx + 1 : -1]  # e.g., ["learned", "random_n100", "raw"]
-            except ValueError:
-                # Fallback: if "ElmanRNN" not present, just use no subdirs
-                subdirs = []
-
-            out_dir = os.path.join(args.out_root, "ElmanRNN", *subdirs)
-            os.makedirs(out_dir, exist_ok=True)
-            args.savename = os.path.join(out_dir, stem)
-
-        else:
-            if args.whh_type == "none":
-                out_dir = os.path.join(args.out_root, "ElmanRNN")
-                prefix = _prefix_from_type("none")  # "random"
-                fname_bits = [f"{prefix}_n{hidden_N}"]
-            else:
-                variant = _resolve_variant(args.whh_type)
-                norm_dir = args.whh_norm
-                out_dir = os.path.join(
-                    args.out_root,
-                    "ElmanRNN",
-                    variant,
-                    args.whh_type,
-                    norm_dir,
-                )
-                if (
-                    args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
-                    and args.alpha is not None
-                ):
-                    out_dir = os.path.join(out_dir, _alpha_tag(args.alpha))
-                prefix = _prefix_from_type(args.whh_type)
-                norm_short = _norm_shortname(args.whh_norm)
-                fname_bits = [f"{prefix}_n{hidden_N}_{norm_short}"]
-                if (
-                    args.whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}
-                    and args.alpha is not None
-                ):
-                    fname_bits.append(_alpha_tag(args.alpha))
-            if not args.whh_path and args.run_tag:
-                fname_bits.append(str(args.run_tag))
-            if not args.whh_path and not args.savename:
-                os.makedirs(out_dir, exist_ok=True)
-                args.savename = os.path.join(out_dir, "_".join(fname_bits))
 
     # -----------------
     # Load training data
@@ -427,13 +323,52 @@ def main():
                 rnn_act=(args.rnn_act),
             )
 
-            # Optional: initialize from --row0
-            if args.row0:
-                row0 = np.load(args.row0).astype(np.float32).reshape(-1)
-                tol = 1e-8  # same as you pass into init_from_row0
+            # Optional: initialize circulant kernel from --whh_path
+            if args.whh_path:
+                try:
+                    log(f"[whh] loading circulant row0 from: {args.whh_path}")
+                    W = np.load(args.whh_path).astype(np.float32)
+                except Exception as e:
+                    msg = (
+                        f"[whh] ERROR: failed to load circulant row0 from "
+                        f"{args.whh_path}: {e}"
+                    )
+                    log(msg)
+                    raise
+
+                # Accept shapes (H,), (1, H), or (H, 1)
+                if W.ndim == 1:
+                    if W.shape[0] != hidden_N:
+                        msg = (
+                            f"[whh] For circulant net, expected row0 of length "
+                            f"{hidden_N}, got shape {W.shape}"
+                        )
+                        log(msg)
+                        raise ValueError(msg)
+                    row0 = W.reshape(-1)
+                elif W.ndim == 2 and 1 in W.shape:
+                    row = W.reshape(-1)
+                    if row.shape[0] != hidden_N:
+                        msg = (
+                            f"[whh] For circulant net, expected row0 of length "
+                            f"{hidden_N}, got shape {W.shape}"
+                        )
+                        log(msg)
+                        raise ValueError(msg)
+                    row0 = row
+                else:
+                    msg = (
+                        f"[whh] For circulant net, whh_path must be a single row "
+                        f"of length {hidden_N}; got array of shape {W.shape}"
+                    )
+                    log(msg)
+                    raise ValueError(msg)
+
+                tol = 1e-8
                 nnz = int(np.count_nonzero(np.abs(row0) > tol))
-                print(
-                    f"[row0] len={row0.size}, nnz>(tol)={nnz}, min={row0.min():.2e}, max={row0.max():.2e}"
+                log(
+                    f"[row0] len={row0.size}, nnz>(tol)={nnz}, "
+                    f"min={row0.min():.2e}, max={row0.max():.2e}"
                 )
                 net.hh_circ.init_from_row0(row0)
 
@@ -463,22 +398,6 @@ def main():
                     )
                 except Exception as e:
                     log(f"[whh] WARNING: failed to load init from whh_path: {e}")
-            elif args.whh_type != "none":
-                try:
-                    path = _resolve_hidden_path(
-                        hidden_N,
-                        args.whh_type,
-                        args.whh_norm,
-                        args.alpha,
-                    )
-                    log(f"[whh] loading hidden weight from: {path}")
-                    _load_hidden_into_elman(
-                        net, path, device=net.rnn.weight_hh_l0.device
-                    )
-                except Exception as e:
-                    log(f"[whh] WARNING: failed to load init: {e}")
-            else:
-                log("[whh] using default random init")
 
         # Cache initial recurrent matrix (after any override)
         W0 = _export_dense_Whh(net).detach().cpu().numpy()
@@ -1249,67 +1168,6 @@ def rng_snapshot():
         if torch.cuda.is_available()
         else None,
     }
-
-
-def _alpha_tag(a: float) -> str:
-    """0.90 -> 'sym0p90', 1.0 -> 'sym1p00'"""
-    pct = int(round(a * 100))
-    major = pct // 100
-    minor = pct % 100
-    return f"sym{major}p{minor:02d}"
-
-
-def _resolve_variant(whh_type: str) -> str:
-    if whh_type in {"cent", "cent-cyc", "shifted", "shifted-cyc"}:
-        return "mh-variants"
-    elif whh_type in {"identity", "shift", "shift-cyc"}:
-        return "shift-variants"
-    elif whh_type == "none":
-        return "random-init"
-    else:
-        raise ValueError(f"Unknown whh_type {whh_type}")
-
-
-def _prefix_from_type(whh_type: str) -> str:
-    mapping = {
-        "cent": "centmh",
-        "cent-cyc": "centcycmh",
-        "shifted": "shiftmh",
-        "shifted-cyc": "shiftcycmh",
-        "identity": "identity",
-        "shift": "shift",
-        "shift-cyc": "shiftcyc",
-        "none": "random",
-    }
-    return mapping[whh_type]
-
-
-def _norm_shortname(norm: str) -> str:
-    return {"frobenius": "fro", "raw": "raw"}[norm]
-
-
-def _resolve_hidden_path(
-    hidden_N: int,
-    whh_type: str,
-    whh_norm: str,
-    alpha: Optional[float] = None,
-    noisy: bool = False,
-) -> str:
-    variant = _resolve_variant(whh_type)
-    norm_dir = whh_norm  # directory name is full strategy
-    base = f"./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/{variant}/{whh_type}/{norm_dir}"
-    # alpha tag needed for {shifted, shifted-cyc, shift, shift-cyc}
-    if whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}:
-        if alpha is None:
-            raise ValueError(
-                "alpha is required for this whh_type (e.g., --alpha 0.90)."
-            )
-        base = f"{base}/{_alpha_tag(alpha)}"
-    prefix = _prefix_from_type(whh_type)
-    norm_short = _norm_shortname(whh_norm)
-    # If your files are strictly n100, set hidden_N=100 (or hardcode 100 here).
-    fname = f"{prefix}_n{hidden_N}_{norm_short}" + ".npy"
-    return os.path.join(base, fname)
 
 
 def _load_hidden_into_elman(

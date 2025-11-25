@@ -102,7 +102,7 @@ parser.add_argument(
     "--partial",
     default=0,
     type=float,
-    help="Sparsity level (0-1). Proportion of RNN params that are frozen by mask.",
+    help="(DEPRECATED / NONFUNCTIONAL). Sparsity level (0-1). Proportion of RNN params that are frozen by mask.",
 )
 parser.add_argument(
     "--input",
@@ -126,17 +126,15 @@ parser.add_argument(
     "--constraini",
     default=0,
     type=int,
-    help="If nonzero, clamp input matrix (weight_ih) to be nonnegative after each step.",
+    help="(DEPRECATED / NONFUNCTIONAL) If nonzero, clamp input matrix (weight_ih) to be nonnegative after each step.",
 )
 parser.add_argument(
     "--constraino",
     default=0,
     type=int,
-    help="If nonzero, clamp output matrix (linear.weight) to be nonnegative after each step.",
+    help="(DEPRECATED / NONFUNCTIONAL) If nonzero, clamp output matrix (linear.weight) to be nonnegative after each step.",
 )
-parser.add_argument(
-    "--fixo", default=0, type=int, help="Fix the output matrix (linear.weight)"
-)
+parser.add_argument("--fixo", default=0, type=int, help="Fix the output matrix")
 parser.add_argument(
     "--clamp_norm",
     default=0,
@@ -153,8 +151,8 @@ parser.add_argument(
     "--rnn_act",
     type=str,
     default="tanh",
-    choices=["none", "tanh", "relu"],
-    help="Hidden activation: none | tanh | relu",
+    choices=["linear", "tanh", "relu"],
+    help="Hidden activation: linear | tanh | relu",
 )
 parser.add_argument(
     "--act_output",
@@ -175,7 +173,7 @@ parser.add_argument(
     "--noisy_train",
     default=0,
     type=float,
-    help="If > 0, add multiplicative Gaussian noise ~N(0, (X*noisy_train)^2) to X and Target each step",
+    help="(DEPRECATED / NONFUNCTIONAL) If > 0, add multiplicative Gaussian noise ~N(0, (X*noisy_train)^2) to X and Target each step",
 )
 parser.add_argument("--seed", type=int, default=1337, help="Global RNG seed")
 parser.add_argument(
@@ -232,11 +230,6 @@ parser.add_argument(
     help="If >=0, start run numbering at this index; otherwise auto-pick the next free index.",
 )
 parser.add_argument(
-    "--noisy",
-    action="store_true",
-    help="If set, use 'noisy' hidden-weight init base and save under ./runs/ElmanRNN/noisy/... (otherwise 'clean').",
-)
-parser.add_argument(
     "--whh_path",
     type=str,
     default="",
@@ -281,6 +274,27 @@ def main():
     global args, f
 
     args = parser.parse_args()
+    if getattr(args, "partial", 0):
+        raise ValueError(
+            "--partial is deprecated and currently nonfunctional. "
+            "Please omit it or set --partial 0."
+        )
+    if getattr(args, "constraini", 0):
+        raise ValueError(
+            "--constraini is deprecated and currently nonfunctional. "
+            "Please omit it or set --constraini 0."
+        )
+    if getattr(args, "constraino", 0):
+        raise ValueError(
+            "--constraino is deprecated and currently nonfunctional. "
+            "Please omit it or set --constraino 0."
+        )
+    if getattr(args, "noisy_train", 0):
+        raise ValueError(
+            "--noisy_train is deprecated and currently nonfunctional. "
+            "Please omit it or set --noisy_train 0."
+        )
+
     if args.whh_path and args.whh_type != "none":
         print(
             "[whh] NOTE: --whh_path provided; overriding --whh_type/--whh_norm/--alpha"
@@ -320,9 +334,7 @@ def main():
 
         else:
             if args.whh_type == "none":
-                out_dir = os.path.join(
-                    args.out_root, "ElmanRNN", _mode_dir(args.noisy), "random-init"
-                )
+                out_dir = os.path.join(args.out_root, "ElmanRNN")
                 prefix = _prefix_from_type("none")  # "random"
                 fname_bits = [f"{prefix}_n{hidden_N}"]
             else:
@@ -331,7 +343,6 @@ def main():
                 out_dir = os.path.join(
                     args.out_root,
                     "ElmanRNN",
-                    _mode_dir(args.noisy),
                     variant,
                     args.whh_type,
                     norm_dir,
@@ -349,9 +360,6 @@ def main():
                     and args.alpha is not None
                 ):
                     fname_bits.append(_alpha_tag(args.alpha))
-            suffix = _noisy_suffix(args.noisy)
-            if not args.whh_path and suffix:
-                fname_bits[-1] += suffix
             if not args.whh_path and args.run_tag:
                 fname_bits.append(str(args.run_tag))
             if not args.whh_path and not args.savename:
@@ -435,18 +443,8 @@ def main():
             net._kernel_K0 = K0  # stash for checkpoint
 
         else:
-            if args.rnn_act == "none":
-                msg = (
-                    "[ERROR] --rnn_act none is not supported by ElmanRNN_pytorch_module_v2 "
-                    "(PyTorch nn.RNN supports only 'tanh' or 'relu'). "
-                    "Use --enforce_circulant for identity/linear hidden activation."
-                )
-                log(msg)
-                sys.exit(1)
-            # Old path: keep your existing model
-            net = ElmanRNN_pytorch_module_v2(
-                N, hidden_N, N, rnn_act=("relu" if args.rnn_act == "relu" else "tanh")
-            )
+            # Dense Elman backend; rnn_act can be 'tanh', 'relu', or 'linear'
+            net = ElmanRNN_pytorch_module_v2(N, hidden_N, N, rnn_act=args.rnn_act)
 
             # --- override hidden weight from disk ---
             if args.whh_path:
@@ -472,7 +470,6 @@ def main():
                         args.whh_type,
                         args.whh_norm,
                         args.alpha,
-                        noisy=args.noisy,
                     )
                     log(f"[whh] loading hidden weight from: {path}")
                     _load_hidden_into_elman(
@@ -1291,14 +1288,6 @@ def _norm_shortname(norm: str) -> str:
     return {"frobenius": "fro", "raw": "raw"}[norm]
 
 
-def _mode_dir(noisy: bool) -> str:
-    return "noisy" if noisy else "clean"
-
-
-def _noisy_suffix(noisy: bool) -> str:
-    return "_noisy" if noisy else ""
-
-
 def _resolve_hidden_path(
     hidden_N: int,
     whh_type: str,
@@ -1308,8 +1297,7 @@ def _resolve_hidden_path(
 ) -> str:
     variant = _resolve_variant(whh_type)
     norm_dir = whh_norm  # directory name is full strategy
-    mode = _mode_dir(noisy)
-    base = f"./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/{mode}/{variant}/{whh_type}/{norm_dir}"
+    base = f"./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/{variant}/{whh_type}/{norm_dir}"
     # alpha tag needed for {shifted, shifted-cyc, shift, shift-cyc}
     if whh_type in {"shifted", "shifted-cyc", "shift", "shift-cyc"}:
         if alpha is None:
@@ -1320,7 +1308,7 @@ def _resolve_hidden_path(
     prefix = _prefix_from_type(whh_type)
     norm_short = _norm_shortname(whh_norm)
     # If your files are strictly n100, set hidden_N=100 (or hardcode 100 here).
-    fname = f"{prefix}_n{hidden_N}_{norm_short}" + _noisy_suffix(noisy) + ".npy"
+    fname = f"{prefix}_n{hidden_N}_{norm_short}" + ".npy"
     return os.path.join(base, fname)
 
 
@@ -1400,7 +1388,7 @@ def _hidden_activation_stats(h_seq, act="tanh", sat_eps=0.95):
         # dead ReLU proxy
         zero_frac = float((h == 0).float().mean().item())
         sat_ratio = None
-    else:  # "none" (identity / linear) or anything else
+    else:  # "linear" (identity) or anything else
         sat_ratio = None
         zero_frac = None
 

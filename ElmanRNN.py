@@ -31,7 +31,7 @@ class ElmanRNN_circulant(nn.Module):
         # Nonlinearity
         if self.rnn_act == "relu":
             self.h_act = nn.ReLU()
-        elif self.rnn_act == "none":
+        elif self.rnn_act == "linear":
             self.h_act = nn.Identity()
         else:
             self.h_act = nn.Tanh()
@@ -224,17 +224,49 @@ class ElmanRNN_pytorch_module_v2(nn.Module):
         self.output_dim = output_dim
         self.n_layers = 1
         self.rnn_act = rnn_act
+        # nn.RNN only accepts 'tanh' or 'relu'; for 'linear' we still
+        # construct an RNN module to reuse its parameters, but we will
+        # implement the recurrence manually in forward().
+        nonlin = "relu" if rnn_act == "relu" else "tanh"
         self.rnn = nn.RNN(
             self.input_dim,
             self.hidden_dim,
             self.n_layers,
             batch_first=True,
-            nonlinearity=self.rnn_act,
+            nonlinearity=nonlin,
         )
         self.linear = nn.Linear(self.hidden_dim, self.output_dim)
         self.act_output = nn.Softmax(2)  # activation function
 
     def forward(self, x, h0):
-        z, _ = self.rnn(x, h0)
+        # x:  (B, T, input_dim)
+        # h0: (1, B, H) or (B, H)
+        if self.rnn_act == "linear":
+            B, T, _ = x.shape
+            h = h0[0] if h0.ndim == 3 else h0  # (B, H)
+
+            # Reuse the underlying nn.RNN parameter tensors
+            W_ih = self.rnn.weight_ih_l0  # (H, input_dim)
+            W_hh = self.rnn.weight_hh_l0  # (H, H)
+            b_ih = getattr(self.rnn, "bias_ih_l0", None)
+            b_hh = getattr(self.rnn, "bias_hh_l0", None)
+
+            z_seq = []
+            for t in range(T):
+                x_t = x[:, t, :]  # (B, input_dim)
+                pre = x_t @ W_ih.t() + h @ W_hh.t()
+                if b_ih is not None:
+                    pre = pre + b_ih
+                if b_hh is not None:
+                    pre = pre + b_hh
+                # Linear/identity hidden: no nonlinearity
+                h = pre
+                z_seq.append(h.unsqueeze(1))
+
+            z = torch.cat(z_seq, dim=1)  # (B, T, H)
+        else:
+            # Tanh or ReLU handled by built-in nn.RNN nonlinearity
+            z, _ = self.rnn(x, h0)
+
         out = self.act_output(self.linear(z))
         return out, z

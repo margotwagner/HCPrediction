@@ -89,3 +89,5 @@ nohup python Main_clean.py \
   --whh_path ./data/Ns100_SeqN100/hidden-weight-inits/ElmanRNN/clean/shift-variants/cyc-shift/sym1p00/cycshift_sym1p00.npy \
   --savename ./runs/ElmanRNN/identityih/shift-variants/cyc-shift/sym1p00/cycshift_sym1p00 \
   --num_runs 7 > ./logs/identityih/cycshift_sym1p00.out 2>&1 &
+
+# 

@@ -1390,21 +1390,37 @@ def _targets_to_angles(Target_stepwise):
 
 def _decode_ring_linear(h_seq, Target_stepwise):
     """
-    Test how well hidden states linearly encode ring position
+    Test how well hidden states linearly encode ring position.
     Simple linear decode: h -> [cos θ, sin θ], returns R^2 mean of both heads.
-    h_seq: [B, T, H], Target_stepwise: [B, T, N]
+
+    h_seq: [B, T, H]
+    Target_stepwise: [B, T, N]
     """
-    ang = _targets_to_angles(Target_stepwise)  # [B, T]
+    # --- work in float32 for numerical stability, regardless of AMP dtype ---
+    h = h_seq.detach().to(torch.float32)
+    tgt = Target_stepwise.detach().to(torch.float32)
+
+    ang = _targets_to_angles(tgt)  # [B, T]
     y = torch.stack([torch.cos(ang), torch.sin(ang)], dim=2)  # [B, T, 2]
-    X = h_seq.reshape(-1, h_seq.shape[2])
-    Y = y.reshape(-1, 2)
+
+    B, T, H = h.shape
+    X = h.reshape(-1, H)  # [B*T, H]
+    Y = y.reshape(-1, 2)  # [B*T, 2]
+
+    # center
     Xc = X - X.mean(dim=0, keepdim=True)
     Yc = Y - Y.mean(dim=0, keepdim=True)
-    # closed-form linear reg: W = (X^T X)^-1 X^T Y  (use ridge λ small)
-    lam = 1e-6
-    XtX = Xc.T @ Xc + lam * torch.eye(Xc.shape[1], device=X.device, dtype=X.dtype)
-    W = _solve_spd_compat(XtX, Xc.T @ Yc, ridge=1e-6)  # [H,2]
+
+    # closed-form linear reg: W = (X^T X)^-1 X^T Y  (with small ridge)
+    lam = 1e-4  # slightly larger ridge, still tiny
+    I = torch.eye(H, device=X.device, dtype=X.dtype)
+    XtX = Xc.T @ Xc + lam * I
+    XtY = Xc.T @ Yc
+
+    W = _solve_spd_compat(XtX, XtY, ridge=1e-4)  # [H, 2]
+
     Yhat = Xc @ W + Y.mean(dim=0, keepdim=True)
+
     # R^2 per head
     ss_res = ((Y - Yhat) ** 2).sum(dim=0)
     ss_tot = ((Y - Y.mean(dim=0, keepdim=True)) ** 2).sum(dim=0) + 1e-12
@@ -1610,15 +1626,29 @@ def _eigvalsh_sym_compat(C: torch.Tensor) -> torch.Tensor:
 def _solve_spd_compat(A: torch.Tensor, B: torch.Tensor, ridge: float = 1e-6):
     """
     Solve (A + ridge*I) X = B for X.
-    Works on old/new Torch; adds small Tikhonov for stability.
-    Assumes A is (approx) symmetric positive semidefinite (like X^T X).
+
+    - Adds small Tikhonov regularization for stability.
+    - Prefers torch.linalg.solve, but if the system is singular or ill-conditioned,
+      falls back to a least-squares / pinv-based solution instead of raising.
     """
     I = torch.eye(A.size(-1), dtype=A.dtype, device=A.device)
     A_reg = A + ridge * I
-    # Newer torch path
+
+    # Preferred path: direct solve
     if hasattr(torch, "linalg") and hasattr(torch.linalg, "solve"):
-        return torch.linalg.solve(A_reg, B)
-    # Older torch: try inverse, then pinverse
+        try:
+            return torch.linalg.solve(A_reg, B)
+        except Exception as e:
+            # Fallbacks if A_reg is effectively singular
+            try:
+                # least-squares solution (handles rank-deficient A_reg)
+                lstsq = torch.linalg.lstsq(A_reg, B)
+                return lstsq.solution
+            except Exception:
+                # final fallback: pseudo-inverse
+                return torch.linalg.pinv(A_reg) @ B
+
+    # Older Torch path: try inverse, then pinverse
     try:
         return torch.inverse(A_reg) @ B
     except Exception:

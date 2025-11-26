@@ -1505,34 +1505,43 @@ def _rfft_power_time_compat(x: torch.Tensor, time_dim: int = 1) -> torch.Tensor:
     - Returns a real tensor with frequencies on the same axis position 'time_dim',
       i.e., shape is the same as x but with T replaced by F (onesided rfft length).
     """
-    # Move time_dim to a known position for older torch.rfft or numpy
-    x_moved = x.transpose(time_dim, -1)  # now last dim is time
-    dev = x.device
-    dtype = x.dtype
+
+
+def _rfft_power_time_compat(x: torch.Tensor, time_dim: int = 1) -> torch.Tensor:
+    """
+    Returns the power spectrum |RFFT|^2 along the time dimension.
+    - Accepts x shaped [..., T, ...] (e.g., [B, T, H] with time_dim=1).
+    - Returns a real tensor with frequencies on the same axis position 'time_dim'.
+    """
+    # Move time_dim to last
+    x_moved = x.transpose(time_dim, -1)
+    dev = x_moved.device
+    orig_dtype = x_moved.dtype
+
+    # --- critical fix: do FFT in float32 on CUDA if we're in half/bfloat16 ---
+    if x_moved.is_cuda and orig_dtype in (torch.float16, torch.bfloat16):
+        x_moved = x_moved.to(torch.float32)
 
     # Path 1: modern torch.fft (preferred)
     if hasattr(torch, "fft") and hasattr(torch.fft, "rfft"):
         X = torch.fft.rfft(x_moved, dim=-1)  # complex
         power = X.real * X.real + X.imag * X.imag
-        power = power.transpose(-1, time_dim)  # put freq axis back at time_dim
+        power = power.transpose(-1, time_dim)
         return power
 
-    # Path 2: old torch.rfft (returns last-dim=2 real-imag)
+    # Path 2: old torch.rfft
     if hasattr(torch, "rfft"):
-        # torch.rfft expects transform along the last dim already
-        Xri = torch.rfft(x_moved, 1, normalized=False, onesided=True)  # [..., F, 2]
-        power = Xri[..., 0] ** 2 + Xri[..., 1] ** 2  # [..., F]
-        power = power.transpose(-1, time_dim)  # freq axis back
+        Xri = torch.rfft(x_moved, 1, normalized=False, onesided=True)
+        power = Xri[..., 0] ** 2 + Xri[..., 1] ** 2
+        power = power.transpose(-1, time_dim)
         return power
 
-    # Path 3: NumPy fallback (CPU)
+    # Path 3: NumPy fallback
     x_np = x_moved.detach().cpu().numpy()
-    X_np = np.fft.rfft(x_np, axis=-1)  # complex
+    X_np = np.fft.rfft(x_np, axis=-1)
     power_np = (X_np.real**2 + X_np.imag**2).astype(np.float32)
     power = torch.from_numpy(power_np).to(dev)
     power = power.transpose(-1, time_dim)
-    if power.dtype != dtype and dtype in (torch.float32, torch.float64):
-        power = power.to(dtype)
     return power
 
 

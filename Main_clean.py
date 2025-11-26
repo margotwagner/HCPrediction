@@ -134,7 +134,17 @@ parser.add_argument(
     type=int,
     help="(DEPRECATED / NONFUNCTIONAL) If nonzero, clamp output matrix (linear.weight) to be nonnegative after each step.",
 )
-parser.add_argument("--fixo", default=0, type=int, help="Fix the output matrix")
+parser.add_argument(
+    "--fixo",
+    default=0,
+    type=int,
+    help=(
+        "Fix the output matrix: "
+        "0=off, 1=positive constant (uniform, frozen), "
+        "2=freeze init, 3=abs-fold nonnegative (frozen), "
+        "4=identity (frozen, zero bias)"
+    ),
+)
 parser.add_argument(
     "--clamp_norm",
     default=0,
@@ -510,6 +520,36 @@ def main():
                         with torch.no_grad():
                             p.copy_(p + torch.abs(p))
                         log(f"[fixo] made {name} nonnegative and froze it")
+                    elif args.fixo == 4:
+                        # Identity decoder (rectangular eye) and freeze
+                        out_dim, hid_dim = p.shape  # (output_dim, hidden_dim)
+                        eye = torch.eye(
+                            out_dim, hid_dim, device=p.device, dtype=p.dtype
+                        )
+                        with torch.no_grad():
+                            p.copy_(eye)
+                        log(f"[fixo] set {name} to identity and froze it")
+
+                        # Also zero & freeze the matching output bias
+                        if (
+                            is_dense_out
+                            and hasattr(net, "linear")
+                            and net.linear.bias is not None
+                        ):
+                            with torch.no_grad():
+                                net.linear.bias.zero_()
+                            net.linear.bias.requires_grad_(False)
+                            log("[fixo] zeroed & froze linear.bias")
+
+                        if (
+                            is_circ_out
+                            and hasattr(net, "output_linear")
+                            and net.output_linear.bias is not None
+                        ):
+                            with torch.no_grad():
+                                net.output_linear.bias.zero_()
+                            net.output_linear.bias.requires_grad_(False)
+                            log("[fixo] zeroed & froze output_linear.bias")
 
                     p.requires_grad_(False)
 

@@ -120,7 +120,7 @@ parser.add_argument(
     "--fixw",
     default=0,
     type=int,
-    help="Fix recurrent weight (rnn.weight_hh_l0) and its bias to constants.",
+    help="(DEPRECATED / NONFUNCTIONAL) Fix recurrent weight (rnn.weight_hh_l0) and its bias to constants.",
 )
 parser.add_argument(
     "--constraini",
@@ -237,6 +237,11 @@ def main():
         raise ValueError(
             "--constraino is deprecated and currently nonfunctional. "
             "Please omit it or set --constraino 0."
+        )
+    if getattr(args, "fixw", 0):
+        raise ValueError(
+            "--fixw is deprecated and currently nonfunctional. "
+            "Please omit it or set --fixw 0."
         )
     if getattr(args, "noisy_train", 0):
         raise ValueError(
@@ -398,6 +403,11 @@ def main():
                     )
                 except Exception as e:
                     log(f"[whh] WARNING: failed to load init from whh_path: {e}")
+
+        # ------------------------------
+        # Frobenius-normalize W_hh at init (dense or circulant)
+        # ------------------------------
+        _frobenius_normalize_hidden(net, hidden_N)
 
         # Cache initial recurrent matrix (after any override)
         W0 = _export_dense_Whh(net).detach().cpu().numpy()
@@ -1691,6 +1701,52 @@ def _has_native_amp() -> bool:
         return torch.cuda.is_available()
     except Exception:
         return False
+
+
+def _target_fro(hidden_N: int) -> float:
+    """
+    Return the desired Frobenius norm for W_hh.
+    Uses THEO_VAR = 1/(3H) => ||W||_F = sqrt(H^2 * THEO_VAR) = sqrt(H/3).
+    """
+    H = float(hidden_N)
+    theo_var = 1.0 / (3.0 * H)
+    return float(((H * H) * theo_var) ** 0.5)
+
+
+@torch.no_grad()
+def _frobenius_normalize_hidden(net: nn.Module, hidden_N: int):
+    """
+    Rescale the hidden->hidden operator (dense or circulant) so that
+    its implied dense matrix has Frobenius norm == _target_fro(hidden_N).
+    Works for:
+      - ElmanRNN_pytorch_module_v2 (nn.RNN backend)
+      - ElmanRNN_circulant (Conv1d backend via _export_dense_Whh).
+    """
+    target_fro = _target_fro(hidden_N)
+
+    # Export implied dense W_hh (CPU or current device)
+    W = _export_dense_Whh(net).detach()
+    cur_fro = float(torch.norm(W, p="fro").item())
+
+    if cur_fro <= 0.0:
+        log(
+            f"[fro] skipped Frobenius normalization; current Fro={cur_fro:.6g} "
+            f"(target={target_fro:.6g})"
+        )
+        return target_fro, cur_fro
+
+    scale = target_fro / cur_fro
+
+    # Scale the actual parameters that implement W_hh
+    for name, p in net.named_parameters():
+        if name == "rnn.weight_hh_l0" or name == "hh_circ.conv.weight":
+            p.mul_(scale)
+
+    log(
+        f"[fro] normalized hidden weight: "
+        f"fro_before={cur_fro:.6g}, fro_after={target_fro:.6g}, scale={scale:.6g}"
+    )
+    return target_fro, cur_fro
 
 
 if __name__ == "__main__":

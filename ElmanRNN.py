@@ -174,7 +174,6 @@ class CirculantHH(nn.Module):
                 torch.flip(w, dims=[0]).contiguous().view(1, 1, K)
             )  # flip for correlation
             self.conv.weight.copy_(w)
-        self.project_fro_to_target()
 
     def forward(self, h_t: torch.Tensor) -> torch.Tensor:
         """

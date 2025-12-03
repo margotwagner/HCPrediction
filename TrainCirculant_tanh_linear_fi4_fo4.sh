@@ -1,15 +1,15 @@
 # From project root (HCPrediction)
 DATA=./data/Ns100_SeqN100/encodings/Ns100_SeqN100_asym1.pth.tar
 INIT_ROOT=./data/Ns100_SeqN100/hidden-weight-inits/11252025
-RUN_ROOT=./runs/ElmanRNN/11252025
-LOG_ROOT=./logs/phase0_circ
+RUN_ROOT=./runs/ElmanRNN/cfg_tanh_linear_fi4_fo4_12022025
+LOG_ROOT=./logs/cfg_tanh_linear_fi4_fo4_12022025/circ
 
 mkdir -p "$RUN_ROOT" "$LOG_ROOT"
 
 EPOCHS=100000      # or whatever you want
 RUNS=3             # num_runs per condition
 SEED=42            # base seed; Main_clean offsets by run_idx
-CFG=cfg_tanh_linear_fi0_fo0         # tag for Phase 0 config
+CFG=cfg_tanh_linear_fi4_fo4         # tag for Phase 0 config
 
 COMMON="--input $DATA \
   --ae 1 --pred 1 \
@@ -17,7 +17,7 @@ COMMON="--input $DATA \
   --epochs $EPOCHS \
   --rnn_act tanh \
   --act_output linear \
-  --fixi 0 --fixo 0 \
+  --fixi 4 --fixo 4 \
   --compile --amp auto \
   --num_runs $RUNS \
   --seed $SEED \
